@@ -37,8 +37,10 @@ let song = try pipe.generate(MusicRequest(tags: "folk,acoustic guitar,female voc
 
 ## Status
 
-V1 (converter + goldens) and V2 (`HeartMuLaCore` at the pre-registered parity floors) — see `MEASUREMENTS.md`. Not yet:
-V2b tiers (8-/4-bit LM, fp16 codec), V3 engine package on `Capability.music`, V4 publish.
+V1 (converter + goldens), V2 (`HeartMuLaCore` at the pre-registered parity floors) and V2b (tiers) — see `MEASUREMENTS.md`.
+Tiers: bf16 or pre-quantised 8-bit LM (`HeartMuLa-oss-3B-8bit`, layer Linears affine g64), fp32 or fp16 codec; the default is
+**8-bit LM + fp16 codec** (8.2 GB after load, 13.8 GB peak, RTF 3.1 on an M5 Max). 4-bit failed its lyric rule and is not
+offered. Not yet: V3 engine package on `Capability.music`, V4 publish.
 
 ## Build
 

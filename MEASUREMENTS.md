@@ -244,3 +244,139 @@ records `phys_footprint` (14.26 / 22.43 GB — inside V0's 16–20 GB working-se
   (style adherence, voice-gender gap, `zh` PER), `phys_footprint` per tier. **V4** publish.
 - Not exercised: CFG ≤ 1 (single-row) path, cancellation mid-window, songs shorter than one codec window (the repeat rule is
   unit-tested only).
+
+## V2b — tiers: gate (stated 2026-10-28 12:35 PDT, before any tier bundle, tier code or take existed — AB-L-0090)
+
+Operator GO 2026-10-28 (AB-T-0376 "V2b — operator GO"). **What a tier is.** The Swift core (`HeartMuLaCore`, the package at the
+V2b commit) renders the 12 V0 songs in one process per tier and draw (`heartmula-gates batch`, the lane added for this rung),
+release build, `MLX_ENABLE_TF32=0` for the whole process (AB-L-0315), MLX cache limit 2 GiB. The AR stage is SAMPLED from MLX's
+generator, so tiers with different weights take different rollouts from the same seed: every number below is a distribution
+over songs, not a parity measure (AB-L-0090).
+
+| tier | LM | codec | how |
+|---|---|---|---|
+| `bf16` | the V1 bundle `HeartMuLa-oss-3B-bf16` | fp32 (`HeartCodec-oss-fp32`) | the tier V2 gated and rendered |
+| `lm8` | **pre-quantised** bundle `HeartMuLa-oss-3B-8bit`: every Linear inside `backbone.layers.*` and `decoder.layers.*` (q/k/v/output_proj, w1/w2/w3 — 28 + 3 layers × 7) affine, group 64, 8-bit, produced from the bf16 bundle with `MLX.quantized` (the op `QuantizedLinear` calls); `text_embeddings`, `audio_embeddings`, `unconditional_text_embedding`, `muq_linear`, `projection`, `codebook0_head`, `audio_head` and the norms stay bf16. `config.json` carries `"quantization": {"group_size": 64, "bits": 8, "mode": "affine"}`; the loader builds `QuantizedLinear`s from it **before** loading — never quantise-at-load | fp32 | |
+| `lm4` | the same at 4-bit (`HeartMuLa-oss-3B-4bit`) | fp32 | |
+| `c16` | bf16 | **fp16** (`HeartCodec-oss-fp16`, V1-gated) | the `bf16` tier's saved codes re-decoded (`heartmula-gates decode`) with the **same codec noise**, so the codec is the only difference |
+
+Implementation change declared now: the codec noise is drawn from MLX's generator re-seeded with a value derived from the request
+seed immediately before `detokenize` (it was the LM's stream continued), so a decode can be repeated on saved codes. The V2 render
+is not re-run for it (its gate was termination, duration, finiteness and footprint, not bit-exactness).
+
+**V1-style checks on the new bundles (must pass before any take):** S0 — the weight-free Swift model quantised from the config has
+flattened paths == the bundle keys (`weight` + `scales` + `biases` on exactly the 217 layer Linears, nothing else); and the
+pre-quantised tensors equal `MLX.quantized` of the bf16 bundle's weights (bit-equal, recomputed by the gate, not by the converter).
+
+**Songs, draws, scorer.** `WIP/acestep-eval/cues/prompts.json` (draw **A**, seeds 1001–1012) and `prompts-b.json` (draw **B**, seeds
+2001–2012 — same rows, E25's second seed set); every tier renders both draws on the same seeds (paired across tiers). Request per
+row as V0: tags = the `style` string by V0's mechanical transform, lyrics verbatim, 120 s cap, CFG 1.5, top-k 50, temperature 1.0,
+codec 10 steps / guidance 1.25. Output = the pipeline's product: 48 kHz stereo float WAV **after the −1 dBFS limiter** (raw peak
+and gain in the manifest; V0 scored unlimited audio — the limiter is one gain ≤ 1). Written to
+`WIP/heartmula-eval/_out/heartmula-swift-<tier>-<a|b>/` with the V0 harness's manifest row shape and scored by
+`WIP/heartmula-eval/harness/score.py` **byte-unchanged** (sha256 `f19b30f2…aedf`; Demucs htdemucs → Whisper-large-v3-turbo MLX →
+phoneme error; AudioBox-Aesthetics PQ / CE on the mix; DNSMOS on the vocals), venv `WIP/acestep-eval/.venv-score`, after the
+render processes have exited. Catastrophic = PER > 0.60. Reference row: V0 upstream torch-MPS bf16 (AB-R-0628): PER 0.165
+(en 0.107 / zh 0.457), 1 catastrophic, PQ 8.30, CE 7.76.
+
+**Rules** (pooled = the mean over the 24 takes A ∪ B; read on the pre-registered seeds, never re-rolled, no best-of-N):
+
+| rule | compares | passes when |
+|---|---|---|
+| **B** | `bf16` vs V0 torch | pooled PER ≤ 0.165 + 0.05 = **0.215** and ≤ 0.35; pooled PQ ≥ 8.00 and CE ≥ 7.46 (V0 − 0.3); catastrophic ≤ 2 in **each** draw |
+| **Q8** | `lm8` vs `bf16` | pooled PER ≤ bf16's + 0.05 and ≤ 0.35; pooled PQ and CE each ≥ bf16's − 0.3; catastrophic (of 24) ≤ bf16's + 2 |
+| **Q4** | `lm4` vs `bf16` | the same as Q8 |
+| **C16** | `c16` vs `bf16` (identical codes and noise) | pooled PER ≤ bf16's + 0.02; pooled PQ and CE each ≥ bf16's − 0.1; per-song waveform SNR vs the fp32 decode reported |
+| **M** (reported) | each tier | `phys_footprint` after load and peak over the process (100 ms sampler, AB-L-0113), MLX peak. Bars to note: the engine admits at 0.7 × RAM — 16.8 GB on a 24 GB Mac, 22.4 GB on 32 GB, 33.6 GB on 48 GB |
+| **S** (reported, AB-D-0162) | each tier | wall, RTF, LM frames/s, codec s per window; never a gate |
+
+**Noise, declared now.** AB-L-0312: a 12-song single-take PER mean of a sampled AR moves ≈ 0.08 between draws, so the 0.05 margins
+are read on the 24-take pools (≈ 0.06 expected spread), and each tier's |PER_A − PER_B| is reported beside its pool as the yardstick.
+A tier missing Q8 / Q4 by ≤ 0.03 is reported as **marginal** — the FAIL stands, the miss is declared, nothing is re-rolled. Because
+`c16` decodes the same codes, its Δ measures the codec alone (Whisper's own run-to-run noise is ≈ 0 on identical audio).
+
+**Offer and default (decided by these rules, not by taste — AB-D-0187; speed never decides — AB-D-0162).** V2b passes when **B**
+passes. V3 offers every tier whose rule passes. **Default LM tier** = the most compact passing tier whose pooled PER is also within
+**0.03** of `bf16`'s (the stricter default bar); otherwise `bf16`. **Default codec** = fp16 if C16 passes, else fp32.
+
+**Reported, not gates (the AB-D-0187 carry):** a `cfg3` run — the `bf16` tier at CFG 3.0 (the example CLI's default) on draw A —
+with PER / AES and the V0 CLAP style retrieval (`laion/larger_clap_music_and_speech`, 12-way rank) beside `bf16`-A's, as the
+cheapest style lever. Voice gender has no valid automatic instrument (V0 deviation 5): the `bf16`-A and `cfg3` takes of the six
+male-voice rows are staged for the operator's ear, not scored. **Rendering discipline:** solo — `pgrep` for other model processes
+before each process and a 10 s overlap log during it; a song that overlapped another GPU job keeps its audio (the sampled path does
+not depend on timing) and is re-timed solo for S only. Results are appended below this line only after every tier is scored.
+
+## V2b — RESULT (2026-10-28 14:25, receipt AB-R-0636; read after every tier was scored; `WIP/heartmula-eval/_out/summary-v2b.md` is the generated table, `WIP/heartmula-eval/_logs/{batch,decode,score}-<tier>-<draw>.log` and `v2b_overlap.log` the receipts)
+
+**B ✅ PASS, Q8 ✅ PASS, Q4 ❌ FAIL, C16 ✅ PASS → V2b PASSES. By the pre-registered rule V3 offers `bf16` and `lm8` (not
+`lm4`) with the fp32 and fp16 codecs; the default is `lm8` + fp16 codec.** Renders 12:38–13:51 PDT, one process at a time,
+`MLX_ENABLE_TF32=0`, cache 2 GiB, **0 overlap events** in the 10 s log; scored 13:51–14:10 with the byte-unchanged scorer
+(sha256 `f19b30f2…` checked at the start). Pre-quantised bundles before any take: `HeartMuLa-oss-3B-8bit` 723 tensors / 4.94 GB
+and `-4bit` 3.38 GB — S0 723 = 723 with exactly 217 scaled Linears, all inside the layers, and every tensor bit-equal to
+`MLX.quantized` of the bf16 weights recomputed by `qcheck` (`receipts/{quantize,qcheck}-{8,4}bit.log`). A 10 s unscored smoke on
+the 4-bit path rendered twice gave byte-identical WAVs (renders are seed-deterministic).
+
+| tier | draw | PER (en / zh) | cat. | AES PQ / CE | DNS | end token | audio s | RTF | LM fr/s | codec s / window | phys after load / peak GB | MLX peak | CLAP rank (A) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| V0 torch-MPS bf16 (AB-R-0628) | A | 0.165 (0.107 / 0.457) | 1 | 8.30 / 7.76 | 2.14 | 8/12 | 109.1 | 0.68 | 10.1 | 4.9 | 16.4 / 39.1 | — | 5.42 |
+| **bf16** (bf16 LM + fp32 codec) | A / B | 0.180 / 0.071 | 1 / 0 | 8.32 / 7.73 · 8.29 / 7.70 | 2.19 / 2.25 | 9 / 10 | 102.9 / 104.1 | 1.85 / 1.83 | 34.5 / 33.8 | 3.55 / 3.52 | **14.26 / 24.03** | 21.3 | 4.50 |
+| bf16 | **pooled 24** | **0.125** (0.139 / 0.059) | 1 | **8.30 / 7.71** | 2.22 | 19/24 | 103.5 | 1.84 | 34.2 | 3.53 | | | |
+| **lm8** (8-bit LM + fp32 codec) | A / B | 0.169 / 0.094 | 1 / 0 | 8.35 / 7.80 · 8.30 / 7.80 | 2.16 / 2.24 | 6 / 8 | 107.3 / 109.6 | 2.18 / 2.19 | 45.0 / 45.2 | 3.53 / 3.52 | **11.33 / 21.03** | 18.4 | 4.50 |
+| lm8 | **pooled 24** | **0.132** (0.139 / 0.092) | 1 | **8.32 / 7.80** | 2.20 | 14/24 | 108.4 | 2.19 | 45.1 | 3.53 | | | |
+| **lm4** (4-bit LM + fp32 codec) | A / B | 0.196 / 0.243 | 0 / 1 | 8.24 / 7.74 · 8.23 / 7.73 | 2.22 / 2.11 | 5 / 6 | 108.0 / 101.0 | 2.47 / 2.49 | 56.5 / 56.6 | 3.52 / 3.52 | **9.76 / 19.35** | 16.8 | 4.42 |
+| lm4 | **pooled 24** | **0.220** (0.246 / 0.088) | 1 | **8.23 / 7.74** | 2.16 | 11/24 | 104.5 | 2.48 | 56.6 | 3.52 | | | |
+| **c16** (bf16 codes → fp16 codec, same noise) | A / B | 0.118 / 0.070 | 0 / 0 | 8.32 / 7.73 · 8.29 / 7.70 | 2.20 / 2.24 | (= bf16) | = bf16 | decode 6.4 s / song | — | ≈ 1.0 | decode-only process 11.11 / 16.79 | 14.7 | 4.58 |
+| c16 | **pooled 24** | **0.094** (0.100 / 0.062) | 0 | **8.31 / 7.72** | 2.22 | | | | | | | | |
+| cfg3 (bf16, CFG 3.0; reported) | A | 0.115 (0.121 / 0.088) | 0 | 8.37 / 7.80 | 2.42 | 8/12 | 101.9 | 1.78 | 33.2 | 3.53 | 14.26 / 23.82 | 21.3 | 4.42 |
+| lm8 + fp16 codec (the default pairing; post-hoc M / S measurement, not scored) | A | — | — | — | — | 6/12 | = lm8 A (codes byte-identical) | **3.08** | 45 | **1.02** | **8.18 / 13.77** | 11.7 | — |
+
+| rule | reading | |
+|---|---|---|
+| **B** | pooled PER **0.125** (≤ 0.215, ≤ 0.35); PQ 8.30 (≥ 8.00), CE 7.71 (≥ 7.46); catastrophic A 1 / B 0 (≤ 2 each) | ✅ |
+| **Q8** | pooled PER **0.132** vs bf16 0.125: **Δ +0.006** (≤ +0.05); PQ 8.32 / CE 7.80 (≥ 8.00 / 7.41); catastrophic 1 (≤ 3); inside the default bar (Δ ≤ 0.03) | ✅ |
+| **Q4** | pooled PER **0.220**: **Δ +0.094** (≤ +0.05; a miss of 0.044 — beyond the 0.03 marginal band); PQ 8.23 / CE 7.74 pass; catastrophic 1 | ❌ |
+| **C16** | pooled PER **0.094** vs 0.125 (Δ −0.032, ≤ +0.02); PQ 8.31 / CE 7.72 (≥ 8.20 / 7.61); waveform SNR vs the fp32 decode **23.6 dB** mean (15.5–28.4) | ✅ |
+
+Noise yardstick |PER_A − PER_B|: bf16 **0.109**, lm8 0.075, lm4 0.047, c16 0.048 — the AB-L-0312 step again (bf16's draw A carries
+two outliers, below). Q8's +0.006 sits far inside it; Q4's +0.094 is about one step, read on 24-take pools with both draws worse
+than either bf16 pool's mean (0.196 / 0.243 vs 0.125) — a real 4-bit lyric cost, as E26 / E25 found for their LMs.
+
+**Disclosed readings.**
+
+1. **The PER instrument is fragile on near-identical audio.** `c16` decodes the *same codes with the same noise* as `bf16`, so the
+   sung content is the same; yet p09-A reads PER 0.807 through the fp32 codec and 0.098 through fp16. The fp32 transcript is the
+   lyrics in order followed by a Whisper repetition loop on the outro ("it is not me" × 40; 224 words for 109 written), the fp16
+   one a short loop (128 words). C16's −0.032 is that one take, not a better codec. The rule stands as scored. bf16-A's other
+   outlier, p02 (0.570), sings the lyrics and then repeats the chorus to the cap (transcript 1.56× the lyrics).
+2. **fp16 codec drift is the TF32 mechanism again** (AB-L-0315): fp16 latents cross `round(9x)/9` boundaries, so the fp16 decode
+   is 23.6 dB from the fp32 decode of the same codes. PER / AES / DNS do not move (C16 passes); audibility is the listening
+   pass's question, not assumed. The fp16 codec is 3.5× faster per window (1.0 vs 3.5 s) and 3.1 GB smaller.
+3. **End token vs the 120 s cap — an observation, not in the pre-registered rule** (the parent session asked for it mid-run):
+   capped takes bf16 **5/24**, lm8 **10/24**, lm4 **13/24**, cfg3 4/12 (V0 torch 4/12). On paired seeds lm8 runs to the cap on
+   6 takes where bf16 ended and its songs are 62 frames (≈ 5 s) longer on average. What the extra capped lm8 takes sing: the
+   lyrics complete and in order, then the chorus or outro repeated (English capped takes' transcripts 1.21× the lyrics vs bf16's
+   capped 1.24×; ended takes 1.04×); one real loop — lm8 p06-A, "keep it movin" × 26 to the cap, PER 0.805, the tier's only
+   catastrophic take. lm4's capped takes ramble more (1.34×, 6 of 12 over 1.3×). So 8-bit delays or loses the end token about
+   twice as often as bf16 without losing lyrics on average; the cost is runtime to the cap and repeated sections. It goes into
+   the V3 offer's notes (`duration` is a cap; `effective.duration_s` is reported) — the rule is not changed after the fact.
+4. **CFG 3.0 is not a style lever here.** CLAP style rank 4.42 vs bf16-A's 4.50 (V0 torch 5.42; the other systems ≈ 2); PER
+   0.115 vs 0.180 and DNS 2.42 vs 2.19 are better on this draw, inside the draw noise. Reported, not adopted; the style gap stays
+   declared. Voice gender: the six male-voice rows' bf16-A and cfg3 takes are staged for the operator (below); no automatic reading.
+5. **Swift bf16 vs V0 torch:** pooled PER 0.125 vs 0.165 (en 0.139 vs 0.107; zh 0.059 vs 0.457 — p11's lost verse did not recur: every
+   Swift take of p11 reads PER ≤ 0.26), PQ / CE 8.30 / 7.71 vs 8.30 / 7.76. Different RNG streams, so a distribution comparison only.
+6. The `lm8 + fp16` row was rendered after the scoring (14:10–14:20, solo) only to measure the default pairing's footprint and
+   speed; its codes are byte-identical to `lm8`-A's (the codec noise no longer shares the LM's stream), so its lyrics are `lm8`-A's.
+
+**Memory (M) against the engine's 0.7 × RAM admission:** `bf16` + fp32 codec 14.26 / 24.03 GB → a **48 GB** Mac (over 32 GB's
+22.4); `bf16` + fp16 codec ≈ 11.1 GB after load (decode-only process; render peak not measured) → 32 GB; `lm8` + fp32 codec
+11.33 / 21.03 → 32 GB; **`lm8` + fp16 codec 8.18 / 13.77 → a 24 GB Mac** (bar 16.8); `lm4` 9.76 / 19.35 (not offered).
+**Speed (S, never a gate):** RTF bf16 1.84, lm8 2.19, lm4 2.48, lm8 + fp16 codec **3.08** (LM 45 frames/s, codec 1.0 s / window).
+
+**Offer and default (the pre-registered decision rule).** Offer `bf16` and `lm8`, each with the fp32 or fp16 codec; not `lm4`
+(Q4 FAIL, +0.094 PER and the most cap-runs). **Default: `lm8` LM + fp16 codec** — the most compact passing LM tier inside the
+0.03 default bar, and C16 passed — 8.2 / 13.8 GB, a 24 GB Mac, RTF 3.1. For V3's notes: lm8 runs to the cap about twice as often
+as bf16 (observation 3); the fp16 codec is 23.6 dB from fp32 (observation 2). If the operator's ear rejects either after the
+staged listening, the fallback is the next tier up (bf16 LM and / or fp32 codec), which this table already measured.
+
+**Listening (evidence, not a gate).** Every tier's draw-A takes are staged as
+`WIP/acestep-eval/_out/listen/<id>__heartmula-swift-{bf16,lm8,lm4,c16,cfg3}.wav` (60 symlinks; `harness/stage_listen_tiers.py`).

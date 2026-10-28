@@ -4,6 +4,10 @@
 //   tokenizer <lm> <goldens/tokenizer>            lane T on the 12 V0 rows
 //   core      <lm> <codec> <goldens/case> [--dtype float32|shipped]   lanes S E P L F N W Q D
 //   render    <lm> <codec> <prompts.json> <id> <out.wav> [--max 120] [--seed N] [--cfg 1.5]
+//   quantize  <lm-bf16> <out> --bits 8|4          V2b: the pre-quantised LM bundle (layer Linears, affine g64)
+//   qcheck    <lm-bf16> <lm-quantised>            V2b: S0 on the quantised model + tensors == MLX.quantized(bf16), bit-equal
+//   batch     <lm> <codec> <prompts.json> <outdir> [--tier name] [--cfg 1.5] [--max 120]   V2b: every row, WAV + codes + manifest
+//   decode    <lm> <codec> <codes-dir> <outdir> [--tier name]   V2b: re-decode a batch's saved codes (same codec noise)
 // Run the fp32 lanes with MLX_ENABLE_TF32=0. relL2 = ‖Δ‖₂/‖ref‖₂, SNR dB = −20·log₁₀ relL2.
 import Foundation
 import HeartMuLaCore
@@ -22,6 +26,8 @@ let maxSeconds = Double(opt("--max", "120"))!
 let seed = UInt64(opt("--seed", "1004"))!
 let cfgScale = Float(opt("--cfg", "1.5"))!
 let cacheGB = Double(opt("--cache-gb", "2"))!
+let bitsOpt = Int(opt("--bits", "8"))!
+let tierName = opt("--tier", "")
 Memory.cacheLimit = Int(cacheGB * Double(1 << 30))
 guard let cmd = args.first else { print("usage: see header"); exit(2) }
 let rest = Array(args.dropFirst())
@@ -382,8 +388,204 @@ func render() throws {
            "\(r.frames) frames, \(r.endedOnEndToken ? "end token" : "cap"), \(String(format: "%.2f", r.effectiveSeconds)) s, finite \(finite), phys \(String(format: "%.2f", Double(physAfterLoad) / 1e9)) / \(String(format: "%.2f", Double(peak) / 1e9)) GB")
 }
 
+// MARK: - V2b lanes
+
+func loadLM(_ dir: URL) throws -> HeartMuLaModel {
+    let lc = try ConfigIO.load(HeartMuLaConfig.self, from: dir.appendingPathComponent("config.json"))
+    let lm = try HeartMuLaModel(lc)
+    if let q = try LMQuantization.from(config: dir.appendingPathComponent("config.json")) { q.apply(to: lm) }
+    var all = [String: MLXArray]()
+    for s in try WeightIO.shards(in: dir) { for (k, v) in try WeightIO.load(s, dtype: nil) { all[k] = v } }
+    try WeightIO.apply(all, to: lm, component: "lm")
+    return lm
+}
+
+func quantizeLane() throws {
+    guard rest.count == 2 else { print("quantize <lm-bf16> <out> --bits N"); exit(2) }
+    let src = url(rest[0]), out = url(rest[1])
+    let lm = try loadLM(src)
+    let q = LMQuantization(groupSize: 64, bits: bitsOpt)
+    q.apply(to: lm)
+    let params = Dictionary(uniqueKeysWithValues: lm.parameters().flattened())
+    eval(Array(params.values))
+    try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    try save(arrays: params, metadata: ["format": "mlx"], url: out.appendingPathComponent("model.safetensors"))
+    var cfg = try ConfigIO.json(src.appendingPathComponent("config.json"))
+    cfg["quantization"] = q.json; cfg["quantization_config"] = q.json
+    var mh = (cfg["mlx_heartmula"] as? [String: Any]) ?? [:]
+    mh["tier"] = "\(bitsOpt)bit"
+    mh["transforms"] = "from the bf16 bundle: every Linear in backbone.layers.* and decoder.layers.* quantised affine group 64 \(bitsOpt)-bit with MLX.quantized (QuantizedLinear); embeddings, muq_linear, projection, codebook0_head, audio_head and norms bf16"
+    mh["from_bundle"] = src.lastPathComponent
+    cfg["mlx_heartmula"] = mh
+    try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys]).write(to: out.appendingPathComponent("config.json"))
+    for f in ["tokenizer.json", "gen_config.json", "LICENSE"] {
+        let d = out.appendingPathComponent(f)
+        try? FileManager.default.removeItem(at: d)
+        try FileManager.default.copyItem(at: src.appendingPathComponent(f), to: d)
+    }
+    let notice = try String(contentsOf: src.appendingPathComponent("NOTICE"), encoding: .utf8)
+        + "\nTier: \(bitsOpt)-bit — the layer Linears of the bf16 bundle quantised affine (group 64) with MLX.quantized; everything else bf16.\n"
+    try notice.write(to: out.appendingPathComponent("NOTICE"), atomically: true, encoding: .utf8)
+    let nq = params.keys.filter { $0.hasSuffix(".scales") }.count
+    let bytes = params.values.reduce(0) { $0 + $1.nbytes }
+    record("quantize \(bitsOpt)-bit", nq == 217, "\(params.count) tensors, \(nq) quantised Linears (217 expected), \(String(format: "%.2f", Double(bytes) / 1e9)) GB → \(out.lastPathComponent)")
+}
+
+func qcheck() throws {
+    guard rest.count == 2 else { print("qcheck <lm-bf16> <lm-quantised>"); exit(2) }
+    let qdir = url(rest[1])
+    guard let q = try LMQuantization.from(config: qdir.appendingPathComponent("config.json")) else { print("no quantization block"); exit(2) }
+    // S0: weight-free model quantised from the config
+    let lc = try ConfigIO.load(HeartMuLaConfig.self, from: qdir.appendingPathComponent("config.json"))
+    let shell = try HeartMuLaModel(lc)
+    q.apply(to: shell)
+    let paths = Set(shell.parameters().flattened().map(\.0))
+    let keys = try bundleKeys(qdir)
+    let scales = keys.filter { $0.hasSuffix(".scales") }
+    let onlyLayers = scales.allSatisfy { $0.hasPrefix("backbone.layers.") || $0.hasPrefix("decoder.layers.") }
+    record("S0 \(qdir.lastPathComponent)", paths == keys && scales.count == 217 && onlyLayers,
+           "\(paths.count) paths vs \(keys.count) keys; \(scales.count) scaled Linears, all inside the layers: \(onlyLayers); missing \(paths.subtracting(keys).sorted().prefix(3)) extra \(keys.subtracting(paths).sorted().prefix(3))")
+    // bit-equality against MLX.quantized of the bf16 bundle, recomputed here
+    var bf = [String: MLXArray](), qb = [String: MLXArray]()
+    for s in try WeightIO.shards(in: url(rest[0])) { for (k, v) in try WeightIO.load(s, dtype: nil) { bf[k] = v } }
+    for s in try WeightIO.shards(in: qdir) { for (k, v) in try WeightIO.load(s, dtype: nil) { qb[k] = v } }
+    var bad: [String] = [], checked = 0
+    for (k, v) in bf {
+        let base = String(k.dropLast(".weight".count))
+        if k.hasSuffix(".weight"), qb[base + ".scales"] != nil {
+            let (wq, sc, bi) = quantized(v, groupSize: q.groupSize, bits: q.bits, mode: .affine)
+            let ok = arrayEqual(wq, qb[k]!).item(Bool.self) && arrayEqual(sc, qb[base + ".scales"]!).item(Bool.self)
+                && arrayEqual(bi!, qb[base + ".biases"]!).item(Bool.self) && sc.dtype == qb[base + ".scales"]!.dtype
+            if !ok { bad.append(k) }
+        } else if !(arrayEqual(v, qb[k]!).item(Bool.self) && v.dtype == qb[k]!.dtype) { bad.append(k) }
+        checked += 1
+    }
+    record("qcheck \(qdir.lastPathComponent)", bad.isEmpty, "\(checked) source tensors checked (quantised Linears recomputed with MLX.quantized g\(q.groupSize) \(q.bits)-bit; the rest bit-equal); mismatches \(bad.count) \(bad.prefix(4))")
+}
+
+struct BatchRow { let id: String; let seed: UInt64; let tags: String; let lyrics: String }
+
+func batchRows(_ prompts: URL) throws -> [BatchRow] {
+    try (ConfigIO.json(prompts)["prompts"] as! [[String: Any]]).map { r in
+        let tags = (r["style"] as! String).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.joined(separator: ",")
+        return BatchRow(id: r["id"] as! String, seed: UInt64(r["seed"] as! Int), tags: tags, lyrics: r["lyrics"] as! String)
+    }
+}
+
+func appendJSONL(_ url: URL, _ row: [String: Any]) throws {
+    let line = String(data: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), encoding: .utf8)! + "\n"
+    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try h.close() }
+    else { try line.write(to: url, atomically: true, encoding: .utf8) }
+}
+
+func doneIDs(_ manifest: URL) -> Set<String> {
+    guard let s = try? String(contentsOf: manifest, encoding: .utf8) else { return [] }
+    return Set(s.split(separator: "\n").compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }.compactMap { $0["id"] as? String })
+}
+
+func writeCodes(_ codes: MLXArray, to url: URL) throws {
+    let a = codes.asType(.int32).asArray(Int32.self)
+    try a.withUnsafeBufferPointer { Data(buffer: $0) }.write(to: url)
+}
+
+func readCodes(_ url: URL) throws -> MLXArray {
+    let d = try Data(contentsOf: url)
+    let a = d.withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
+    return MLXArray(a, [8, a.count / 8])
+}
+
+func batch() throws {
+    guard rest.count == 4 else { print("batch <lm> <codec> <prompts.json> <outdir>"); exit(2) }
+    let out = url(rest[3]); try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    let manifest = out.appendingPathComponent("manifest.jsonl")
+    let sampler = Footprint.Sampler()
+    let pipe = try loadPipeline(rest[0], rest[1], .shipped)
+    let physAfterLoad = sampler.mark()
+    let done = doneIDs(manifest)
+    var processPeak = physAfterLoad
+    for row in try batchRows(url(rest[2])) where !done.contains(row.id) {
+        sampler.resetPeak()
+        let t0 = Date()
+        let r = try pipe.generate(MusicRequest(tags: row.tags, lyrics: row.lyrics, maxSeconds: maxSeconds, seed: row.seed,
+                                               sampling: SamplingConfig(cfgScale: cfgScale)))
+        let wall = Date().timeIntervalSince(t0)
+        let wav = out.appendingPathComponent("\(row.id).wav")
+        let samples = r.audio.transposed(1, 0).asArray(Float.self)
+        try WAV.writeFloat32(samples, channels: 2, sampleRate: 48_000, to: wav)
+        try writeCodes(r.codes, to: out.appendingPathComponent("\(row.id).codes.bin"))
+        let songPeak = sampler.peak
+        processPeak = max(processPeak, songPeak)
+        let item: [String: Any] = [
+            "id": row.id, "ok": true, "wav": wav.path, "tier": tierName, "seed": row.seed, "cfg": cfgScale, "tags": row.tags,
+            "audio_s": r.effectiveSeconds, "sr": 48_000, "channels": 2, "wall_s": wall, "rtf": r.effectiveSeconds / wall,
+            "frames": r.frames, "ended_on_end_token": r.endedOnEndToken, "prompt_tokens": r.promptTokens,
+            "lm_s": r.lmSeconds, "lm_frames_per_s": Double(r.frames) / r.lmSeconds, "dit_s": r.ditSeconds.reduce(0, +),
+            "dit_windows": r.ditSeconds.count, "sq_s": r.sqSeconds, "raw_peak": r.rawPeak, "limiter_gain": r.limiterGain,
+            "finite": samples.allSatisfy { $0.isFinite }, "phys_after_load": physAfterLoad, "phys_peak": songPeak,
+            "mlx_peak": Memory.peakMemory, "t": ISO8601DateFormatter().string(from: Date()),
+        ]
+        try appendJSONL(manifest, item)
+        log("\(row.id) seed \(row.seed): \(r.frames) frames \(r.endedOnEndToken ? "eos" : "cap") \(String(format: "%.1f", r.effectiveSeconds)) s in \(String(format: "%.1f", wall)) s (RTF \(String(format: "%.2f", r.effectiveSeconds / wall)), LM \(String(format: "%.1f", Double(r.frames) / r.lmSeconds)) fr/s); peak \(String(format: "%.3f", r.rawPeak)) gain \(String(format: "%.3f", r.limiterGain)); phys peak \(String(format: "%.2f", Double(songPeak) / 1e9)) GB")
+        Memory.clearCache()
+    }
+    let peak = max(processPeak, sampler.stop())
+    try appendJSONL(out.appendingPathComponent("run.jsonl"), ["tier": tierName, "phys_after_load": physAfterLoad, "phys_process_peak": peak,
+                                                             "mlx_peak": Memory.peakMemory, "lm": rest[0], "codec": rest[1], "prompts": rest[2],
+                                                             "cfg": cfgScale, "t": ISO8601DateFormatter().string(from: Date())])
+    record("batch \(tierName)", true, "phys after load \(String(format: "%.2f", Double(physAfterLoad) / 1e9)) GB, process peak \(String(format: "%.2f", Double(peak) / 1e9)) GB, MLX peak \(String(format: "%.2f", Double(Memory.peakMemory) / 1e9)) GB")
+}
+
+func decodeLane() throws {
+    guard rest.count == 4 else { print("decode <lm> <codec> <codes-dir> <outdir>"); exit(2) }
+    let src = url(rest[2]), out = url(rest[3]); try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    let manifest = out.appendingPathComponent("manifest.jsonl")
+    let sampler = Footprint.Sampler()
+    let pipe = try loadPipeline(rest[0], rest[1], .shipped)
+    let physAfterLoad = sampler.mark()
+    let done = doneIDs(manifest)
+    let srcRows = try String(contentsOf: src.appendingPathComponent("manifest.jsonl"), encoding: .utf8).split(separator: "\n")
+        .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+    for r in srcRows where !done.contains(r["id"] as! String) {
+        let id = r["id"] as! String, seed = (r["seed"] as! NSNumber).uint64Value
+        let codes = try readCodes(src.appendingPathComponent("\(id).codes.bin"))
+        let t0 = Date()
+        let d = try pipe.decode(codes: codes, seed: seed)
+        let wall = Date().timeIntervalSince(t0)
+        let samples = d.audio.transposed(1, 0).asArray(Float.self)
+        let wav = out.appendingPathComponent("\(id).wav")
+        try WAV.writeFloat32(samples, channels: 2, sampleRate: 48_000, to: wav)
+        // vs the source tier's audio (same codes, same noise): SNR of the raw (pre-limiter) waveforms
+        let refRaw = try readWAVFloat(src.appendingPathComponent("\(id).wav")) / Float((r["limiter_gain"] as! NSNumber).doubleValue)
+        let mineRaw = MLXArray(samples, [samples.count / 2, 2]) / d.gain
+        let n = min(refRaw.dim(0), mineRaw.dim(0))
+        let rel = relL2(mineRaw[..<n], refRaw[..<n])
+        try appendJSONL(manifest, ["id": id, "ok": true, "wav": wav.path, "tier": tierName, "seed": seed, "audio_s": Double(d.audio.dim(1)) / 48_000,
+                                   "decode_s": wall, "dit_s": d.result.windowSeconds.reduce(0, +), "sq_s": d.result.sqSeconds,
+                                   "raw_peak": d.rawPeak, "limiter_gain": d.gain, "snr_vs_source_db": snr(rel), "source": src.lastPathComponent,
+                                   "frames": codes.dim(1), "phys_after_load": physAfterLoad, "phys_peak": sampler.peak])
+        log("\(id): decoded \(codes.dim(1)) frames in \(String(format: "%.1f", wall)) s; SNR vs \(src.lastPathComponent) \(String(format: "%.1f", snr(rel))) dB")
+        Memory.clearCache()
+    }
+    let peak = sampler.stop()
+    try appendJSONL(out.appendingPathComponent("run.jsonl"), ["tier": tierName, "phys_after_load": physAfterLoad, "phys_process_peak": peak,
+                                                             "mlx_peak": Memory.peakMemory, "codec": rest[1], "source": src.path])
+    record("decode \(tierName)", true, "phys after load \(String(format: "%.2f", Double(physAfterLoad) / 1e9)) GB, peak \(String(format: "%.2f", Double(peak) / 1e9)) GB")
+}
+
+/// 32-bit float WAV (our writer's layout: 44-byte header) → (frames, channels).
+func readWAVFloat(_ url: URL) throws -> MLXArray {
+    let d = try Data(contentsOf: url)
+    let ch = Int(d.subdata(in: 22 ..< 24).withUnsafeBytes { $0.load(as: UInt16.self) })
+    let a = d.subdata(in: 44 ..< d.count).withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    return MLXArray(a, [a.count / ch, ch])
+}
+
 do {
     switch cmd {
+    case "quantize": try quantizeLane()
+    case "qcheck": try qcheck()
+    case "batch": try batch()
+    case "decode": try decodeLane()
     case "contract": try contract()
     case "convcheck": try convcheck()
     case "tokenizer": try tokenizerLane()
