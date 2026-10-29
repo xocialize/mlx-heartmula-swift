@@ -380,3 +380,178 @@ staged listening, the fallback is the next tier up (bf16 LM and / or fp32 codec)
 
 **Listening (evidence, not a gate).** Every tier's draw-A takes are staged as
 `WIP/acestep-eval/_out/listen/<id>__heartmula-swift-{bf16,lm8,lm4,c16,cfg3}.wav` (60 symlinks; `harness/stage_listen_tiers.py`).
+
+## V3 — the engine package `MLXHeartMuLa`: gate (stated 2026-10-28 16:55 PDT, before the package was written, built or run — AB-L-0090)
+
+Operator GO 2026-10-28 ("Start V3 now"), scope from V2b's offer. `HeartMuLaPackage` (`@InferenceActor`, `ModelPackage`, module
+`MLXHeartMuLa` in `PROD/HeartMuLa/mlx-heartmula-swift`) wraps `HeartMuLaPipeline` on `Capability.music`, built against
+mlx-engine-swift **0.72.0** (contract 1.57.0 ≥ 1.56.0, the music capability). Pattern: YuE2 / MiniMax V3.
+
+**Declared, because gated.** The core only: `caption` → the tags (comma-split, trimmed, lower-cased, re-joined — exactly the V0 /
+V2b harness's `tags_for`), `lyrics` (section tags inline; empty refused — no instrumental mode was gated), `seed` (nil → drawn),
+`durationSeconds` as a **cap** (nil → 120 s, heartlib's pipeline default and the V2b length; `maxDurationSeconds` **240**,
+upstream's documented CLI default; the prompt + frames must fit the backbone's 8 192 positions, refused legibly otherwise). The
+effective duration is the audio's own length (`effective.duration_s` at the MES layer) and `truncated` is true exactly when the
+cap, not the end token, ended the song (C3). **Undeclared, because the model has no such input or nothing gated it:**
+`.referenceAudio` / `.sourceAudio` / edits (the MuQ reference slot is a zero vector upstream), `.planning` / `.score` /
+`.anchors` (no planner), `.vocalLanguage` (no language slot; it sings the lyrics' script), `.timestamps`, `.guidanceScale`
+(CFG 1.5 / codec CFG 1.25 is the recipe; V2b's CFG 3.0 row is an observation, not a gated control). No metaData levers. Progress
+phases: `generate` (per LM frame of the cap) → `denoise` (per Euler step, stage = codec window) → `decode` (per SQ-Codec window)
+→ `postprocess`; cancellation checked at each of those seams, `CancellationError` rethrown unchanged.
+
+**Tiers (V2b's offer).** `HeartMuLaConfiguration.quant` (the LM) ∈ {`.int8` default, `.bf16`} × `.codec` ∈ {`.fp16` default,
+`.fp32`}; the 8-bit LM loads the **pre-quantised** bundle (no quantise-at-load); any other `Quant` is refused by `load()` with
+the reason, before any weight is touched. Footprints: `QuantFootprint(.bf16)` and `(.int8)` carry the fp16-codec pairing; the
+fp32-codec pairings declare their own resident / activation through `FootprintConfigured` hints. Default-ness is the host's
+(`MLXServeEngine.setDefault` keeps ACE-Step for `music`; this package is offered by `PackageID("heartmula-oss-3b")`).
+
+**Licence (C7 / C8).** `weightLicense: .apache2`, `portCodeLicense: .mit`; informational notices: the grant chain (the generator
+HF repos carry no LICENSE file — the grant is the model cards + heartlib's README of 2026-01-20; `tokenizer.json` is the
+Llama-3.2 tokenizer's vocabulary), and the measured character (weak style-tag adherence: CLAP rank ≈ 4.5 vs ≈ 2 for the other
+music models, CFG 3.0 doesn't help; the male-voice gap; the 8-bit LM's cap rate 10/24 vs bf16 5/24 with one loop; weak Mandarin,
+V0 zh PER 0.457). Provenance `HeartMuLa/HeartMuLa-oss-3B-happy-new-year` @ `41f6fc68490e11dc43fdabaa6b5767946408c903`, tier 3.
+Weight sources (four roles' repos, unpublished V4 candidates): `mlx-community/HeartMuLa-oss-3B-{bf16,8bit}`,
+`mlx-community/HeartCodec-oss-{fp32,fp16}`; today the package loads explicit bundle directories.
+
+**TF32 (AB-L-0315).** MLX latches `MLX_ENABLE_TF32` on the first matmul of the process (`static` in `env::enable_tf32()`), so a
+package cannot switch it off once a host has run another model. The package (a) exports `HeartMuLaPackage.configureProcess()`
+(sets `MLX_ENABLE_TF32=0`) for the host to call at engine start, (b) calls it at the top of `load()`, and (c) probes the
+effective setting in `load()` (a 256³ fp32 matmul on the GPU vs the CPU stream; TF32 reads ~1e-4 relL2, fp32 ~1e-7; threshold
+1e-5). Two pre-registered checks decide the policy:
+- **T1 — the probe classifies:** fresh processes with `MLX_ENABLE_TF32=0` and `=1` read "off" and "on" respectively (relL2 on
+  each side of 1e-5 by ≥ 10×).
+- **T2 — is the default tier TF32-immune?** `lm8` + fp16 codec, p04 folk, seed 1004, 120 s cap, rendered with TF32 on and off in
+  two solo processes. **Immune** = codes byte-identical AND waveform SNR ≥ 60 dB between the two. If immune: fp16-codec tiers
+  load whatever the latch says (the reading is logged); fp32-codec tiers refuse under TF32-on with a legible error naming the
+  fix (`configureProcess()` before the first MLX op). If not immune: every tier refuses under TF32-on.
+
+**Offline gate** — `swift test --filter MLXHeartMuLaTests` (no kernel evals). PASS = every test green: C1 (`music` only), C7 /
+C8 (Apache-2.0 + MIT, `.permissiveOnly` admits, an `.advisory` engine records 0 advisories, `missingRequiredDisplayNotices`
+empty), C11 (parameters exactly {caption, lyrics, durationSeconds, seed}, features empty, maxDuration 240,
+`declarationProblems` empty), C0 (contract ≥ 1.56.0), provenance (40-char sha), C-memory (footprints `[.bf16, .int8]` ≥ the
+measurements below, the fp32-codec hints, nil hints on the fp16 pairings), MAT-1..5 per offered pairing (4), CAN-1..3
+(pre-cancelled `run()` → `CancellationError`; cadence generate/token, denoise/step, decode/chunk), the unloaded refusal, the
+unoffered-quant refusal, and the request plane (every undeclared feature, bound and empty field refused with
+`unsupportedRequestFeature`; the caption → tags mapping; nil → 120 s).
+
+**Live gate — per offered pairing (4), one process at a time, solo** — `heartmula-gates validate` through `MLXServeEngine`
+in-process (register under the default policy → prepare → one song: p04 folk, seed 1004, 120 s cap → refusals → evict),
+`phys_footprint` sampled at 100 ms, MLX cache 1 GiB, `MLX_ENABLE_TF32=0`. PASS per pairing = registered with **0 licence
+advisories**; `needsDownload` false on the explicit bundles; the song finite 48 kHz stereo, length in (10 s, cap], sample peak ≤
+−1 dBFS + one 16-bit LSB (the limiter), RMS in (−40, −3) dBFS; phases reported (`generate` > 100, `denoise` ≥ 10 per window,
+`decode` ≥ 1, `postprocess` 1); `truncated` consistent with the length (truncated ⇒ length ≥ cap − 1 s; not truncated ⇒ length <
+cap); every refusal refused with `PackageError`; phys after evict < 1.5 GB.
+
+**Envelope — per offered pairing** — `heartmula-gates envelope`: loaded as `load()` loads, a 240 s run with the end token ignored
+(3 000 frames, the longest KV cache) on the longest V0 lyrics, then the codec over all of it; phys_footprint peak.
+
+**Footprint rule (C-memory).** resident = phys after `prepare` in `validate`, rounded up to the next 0.5 GB; activation = max(the
+validate song's peak, the envelope's peak, V2b's 12-song process peak where one exists for that pairing) − that resident,
+rounded up to the next 0.5 GB. Expectations written down (V2b): lm8 + fp16 ≈ 8.2 / 13.8 GB → ≈ 8.5 + 5.5 (a 24 GB Mac by the
+engine's 0.7 × RAM rule); lm8 + fp32 11.3 / 21.0; bf16 + fp16 ≈ 11.1 / (unmeasured); bf16 + fp32 14.3 / 24.0 (48 GB).
+
+**Test app.** As for E25–E26: the AppKit test app's project on `/Volumes/DEV_VOL1` is closed to tooling, so "through
+MLXServeEngine" is met on the CLI consumer path (the same register / prepare / run / evict calls, in-process, with the engine's
+admission and licence gate); the app link is recorded as open. **C0–C13** reviewed item by item after the lanes ran. Results are
+appended below this line only after the lanes ran. Nothing is pushed or published at V3.
+
+## V3 — RESULT (2026-10-28 17:25, receipt AB-R-0641; read after every lane ran; receipts `WIP/heartmula-port/receipts/{build-v3,test-v3}.log`, `v3-t1-tf32probe.log`, `v3-t2/`, `validate-<pairing>{,-retime,-final}.log`, `envelope-<pairing>.log`, `v3-tf32policy.log`, `v3_overlap{,2}.log`, `validate/p04__engine_<pairing>.wav`)
+
+Package `PROD/HeartMuLa/mlx-heartmula-swift`, module `MLXHeartMuLa` (`HeartMuLaPackage`, surface `heartmula-oss-3b`), built against
+mlx-engine-swift **0.73.0** (SwiftPM resolved `from: 0.72.0` to the newer tag; contract 1.58.0 ≥ 1.56.0).
+
+**Offline gate ✅ — 18 / 18 tests green** (`swift test --filter MLXHeartMuLaTests`, no kernel evals): licence Apache-2.0 + MIT,
+`.permissiveOnly` admits, an `.advisory` and a `.blocking` engine both register it with 0 advisories, no required notice, three
+informational notices (grant chain incl. "no LICENSE file", 2026-01-20, Llama-3.2; the measured character; the cap note);
+parameters exactly {caption, lyrics, durationSeconds, seed}, features empty, maxDuration 240, `declarationProblems` empty;
+contract ≥ 1.56; provenance 40-char; footprints `[.bf16, .int8]` + fp32-codec hints ≥ every reading below; MAT-1..5 for all four
+pairings; CAN-1..3 (generate/token, denoise/step, decode/chunk); the unloaded refusal; `.int4` / `.fp32` LM refused by `load()`
+before any weight; the request plane (14 refusals, the tags mapping, the cap → frames mapping). The first run had one red test,
+a float-noise bound in the test itself (a stride-made cap of 190.79999999999998 s × 12.5 rounds to exactly 2 385 frames =
+190.8 s); the bound got a 1e-9 s tolerance — disclosed, no package change.
+
+**T1 ✅** the probe reads 2.71e-7 with `MLX_ENABLE_TF32=0` and 7.72e-4 with `=1` or unset (37× and 77× either side of 1e-5),
+repeatable to the digit. **T2 ✅ immune** — `lm8` + fp16, p04 seed 1004: codes AND the WAV byte-identical with TF32 on and off
+(∞ dB), and byte-identical to V2b's `lm8c16`-A codes (the V3 Core edits — progress / cancel probes, `maxMs` rounding — change no
+number). So, by the pre-registered rule, the fp16-codec tiers load whatever latched and the fp32-codec tiers refuse under
+TF32-on. Verified live (`tf32policy`, reported, not a bar): TF32 latched on by a matmul before the engine → the fp32 codec is
+refused with the fix named ("call HeartMuLaPackage.configureProcess() at engine start … or choose the fp16 codec"), the fp16
+codec loads; latched off → both load.
+
+**Live gate ✅ PASS on all four pairings** — `heartmula-gates validate` in-process through `MLXServeEngine` (register under the
+default policy → prepare → p04 folk, seed 1004, 120 s cap → ten refusals → evict), `MLX_ENABLE_TF32=0`, cache 1 GiB:
+
+| pairing (`Quant` + codec) | phys after prepare | engine charges | peak over the song | song | solo wall (RTF) | phases | after evict |
+|---|---|---|---|---|---|---|---|
+| **int8 + fp16 (default)** | 8.32 GB | 8.50 GB (final build) | 12.69 / 12.82 / 12.22 GB (3 runs) | 70.24 s, end token (`truncated` false), peak −1.00 dBFS, rms −16.3 dBFS | 23.1 s (**3.04**) | generate 878, denoise 30 (3 windows × 10), decode 3, postprocess 1 | 0.22 GB |
+| int8 + fp32 | 11.33 / 11.47 GB | (hint) | 19.47 / 19.60 GB | same codes → 70.24 s, rms −16.1 dBFS | 30.9 s (2.27) | same | 0.20 GB |
+| bf16 + fp16 | 11.26 GB | — | 15.75 / 15.78 GB | 97.36 s, end token, rms −17.4 dBFS | 39.4 s (2.47) | generate 1 217, denoise 40, decode 4, postprocess 1 | 0.22 GB |
+| bf16 + fp32 | 14.40 GB | (hint) | 21.22 GB | 97.36 s, end token, rms −17.4 dBFS | 52.6 s (1.85) | same | 0.20 GB |
+
+Every pairing: 0 licence advisories, `needsDownload` false on the explicit bundles, the song finite 48 kHz stereo in (10 s, cap]
+with the limiter's −1 dBFS ceiling held, `truncated` consistent, all ten refusals `PackageError.unsupportedRequestFeature` with
+the control named (planning, score, edit/cover, referenceAudio, vocalLanguage, anchors, durationSeconds 400 > 240 and 0.5 < 1,
+empty lyrics, empty caption). Re-runs reproduce each pairing's WAV byte for byte. (The 97.36 s bf16 song is V2's p04 render
+length again.)
+
+**Envelope** (240 s, end token ignored, the longest V0 lyrics — p06 hip-hop, 238 prompt positions + 3 000 frames → **240.00 s**
+of audio, 10 codec windows): phys peak int8 + fp16 **12.80 GB**, int8 + fp32 18.40, bf16 + fp16 15.68, bf16 + fp32 21.61 —
+under each pairing's V2b 12-song peak: the KV cache of 3 238 positions is small next to the codec's activation.
+
+**Declared (the pre-registered rule; resident = the larger phys after prepare, activation = max(song, envelope, V2b process
+peak) − resident, each rounded up to 0.5 GB):**
+
+| pairing | declared | binding peak | engine's 0.7 × RAM class |
+|---|---|---|---|
+| **int8 + fp16 (default)** — `QuantFootprint(.int8)` | **8.5 + 5.5 = 14.0 GB** | 13.77 (V2b 12 songs) | **24 GB Mac** (≤ 16.8) |
+| bf16 + fp16 — `QuantFootprint(.bf16)` | 11.5 + 6.0 = 17.5 GB | 16.79 (V2b c16 decode process) | 32 GB |
+| int8 + fp32 — hint | 11.5 + 10.0 = 21.5 GB | 21.03 (V2b) | 32 GB (≤ 22.4) |
+| bf16 + fp32 — hint | 14.5 + 10.0 = 24.5 GB | 24.03 (V2b) | 48 GB |
+
+**Disclosed against the pre-registration:**
+1. **`guidanceScale` is ignored, not refused.** The pre-registration said every undeclared feature is refused; the contract's
+   `MusicFeature.guidanceScale` says an undeclared scale is NOT refused (an ignored scale still yields the song asked for), and
+   the engine's `MusicControls.refusal` never checks it. The package follows the contract (as MiniMax does); a test pins it.
+2. **The cap bounds the audio.** heartlib's rollout counts its first frame on top of `max_audio_length_ms / 80`, so its 120 s cap
+   yields 1 501 frames = 120.08 s (every V2b capped take). Before any validate run the package was made to pass
+   `floor(cap × 12.5)` frames in all (`SongRequest.lmSeconds(cappingAudioAt:)`), so a capped engine song is ≤ the cap (the
+   envelope: exactly 240.00 s). Caps under 1 s are refused (`minDurationSeconds`).
+3. **Overlaps — and a blind watcher.** Another session's headless Gaea server spawned image workers (qwen-image, z-image,
+   flux2-klein) on and off throughout. The first run's watcher matched `ps comm`, which macOS truncates to `/tmp/g371r/main/`
+   when `args` follows, so it saw nothing and the wait-for-free passed; a corrected watcher (full args) then logged a qwen
+   worker 17:07:33–17:08:09. The validate lanes int8 + fp16, int8 + fp32 and bf16 + fp16 were therefore marked and **re-timed
+   solo** (the fixed runner waited 155 s for the GPU); the timings above are the solo runs (the first int8 + fp32 run read RTF
+   0.57). A z-image worker appeared at the first watcher sample after the int8 + fp16 re-time ended — at most its last ≤ 5 s;
+   its RTF (3.04) matches V2b's 3.08. bf16 + fp32 and the four envelopes ran clean (lesson AB-L-0317). phys_footprint is per process, so no memory
+   reading depends on this; songs are byte-identical across runs. **V2b's watcher had the same `comm` blind spot**: its
+   "0 overlaps" covered gates and python jobs only and could not see a Gaea worker — V2b's verdicts rest on scores and
+   per-process memory, which an overlap cannot move, but its RTFs carry that caveat.
+4. **Contract version.** Pre-registered against 0.72.0 (contract 1.57.0); SwiftPM resolved 0.73.0 (1.58.0). Both ≥ 1.56.0.
+
+**C0–C13 (reviewable):** **C0** `contractVersion` = 1.58.0 (≥ 1.56.0, test). **C1** `Capability.music` only, one surface
+`heartmula-oss-3b`. **C2** `MusicRequest` → `MusicResponse` with canonical `.wav` audio (48 kHz, 2 ch), canonical field names.
+**C3** `Audio` serialized (16-bit PCM WAV bytes); `truncated` exact; the effective duration is the audio's length (MES
+`effective.duration_s`). **C4** no modes; tiers are configuration, not surfaces. **C5** no metaData keys. **C6** `specialties: []`
+(a general song generator; non-default by the host's `setDefault`, not by a specialty). **C7** `weightLicense: .apache2`
+(allowlisted), grant chain as an informational notice and in each bundle's NOTICE. **C8** `portCodeLicense: .mit`
+(THIRD_PARTY_NOTICES credits heartlib Apache-2.0). **C9** `HeartMuLaConfiguration` (`quant`, `codec`, revisions,
+`cacheLimitBytes`) Codable with environment URLs excluded; `QuantConfigured`, `FootprintConfigured`, `WeightSourcing`,
+`WeightPrewarming`, `ModelStorable`. **C10** `RequirementsManifest`: two `QuantFootprint`s + two hints measured as
+phys_footprint through the engine, `requiredBackends [.metalGPU]`, macOS 26. **C11** the surface declares exactly the core;
+the engine refuses the rest before admission (validated live). **C12** the package switches over `Quant` with `default`, no
+closed-enum assumption over `Capability`. **C13** `registration = .of(HeartMuLaPackage.self)`; no compute in `init`; weights
+in `load()`, released in `unload()` (phys 0.20–0.22 GB after evict); `run` checks cancellation at entry and at every LM frame,
+Euler step and SQ-Codec window, rethrowing `CancellationError` unchanged; no private queue. **One process-wide side effect,
+declared:** `load()` sets `MLX_ENABLE_TF32=0` (`configureProcess()`), which is effective only before the process's first matmul
+— the contract has no field for a process-environment requirement (asked of mlx-engine: AB-A-0215).
+
+**Test app.** As pre-registered: met on the CLI consumer path (the same `MLXServeEngine` register / prepare / run / evict calls,
+in-process, with the engine's admission and licence gate); the AppKit test app link stays open.
+
+## Verdict (2026-10-28)
+
+**V3 PASS.** `MLXHeartMuLa` is admitted on `Capability.music` through `MLXServeEngine` on all four offered pairings, with the
+footprints measured and declared: **default int8 LM + fp16 codec, 8.5 + 5.5 GB — a 24 GB Mac, RTF ≈ 3**; bf16 + fp16 17.5 GB and
+int8 + fp32 21.5 GB (32 GB Macs); bf16 + fp32 24.5 GB (48 GB). Apache-2.0, non-default beside ACE-Step, the measured character in
+the notices. Hosts call `HeartMuLaPackage.configureProcess()` at engine start for the fp32 codec; the default tier is
+TF32-immune. Nothing pushed or published; V4 is the operator's call.

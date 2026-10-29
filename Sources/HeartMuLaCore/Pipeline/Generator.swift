@@ -130,8 +130,10 @@ public struct GenerationResult {
 
 public enum Rollout {
     /// `_forward`: prompt → first frame; then up to `maxMs / 80` frames; stop on the end token. `progress(frame)` may cancel.
+    /// `stopOnEndToken: false` is the V3 envelope lane's worst case only (the longest KV cache): an end-token frame is clamped
+    /// into the codec's 8 192-entry range and the rollout runs on to the cap.
     public static func generate(model: HeartMuLaModel, prompt: HeartMuLaPrompt, maxMs: Int, sampling: SamplingConfig,
-                                noise: NoiseSource, audioEOS: Int = 8193,
+                                noise: NoiseSource, audioEOS: Int = 8193, stopOnEndToken: Bool = true,
                                 progress: ((Int) -> Bool)? = nil) throws -> GenerationResult {
         let gen = FrameGenerator(model: model, sampling: sampling)
         let t0 = Date()
@@ -147,7 +149,10 @@ public enum Rollout {
             if let progress, !progress(i) { throw HeartMuLaError.cancelled("generation cancelled at frame \(i)") }
             code = gen.frame(gen.nextInput(code), noise: noise)
             eval(code)
-            if code.max().item(Int32.self) >= Int32(audioEOS) { ended = true; break }
+            if code.max().item(Int32.self) >= Int32(audioEOS) {
+                if stopOnEndToken { ended = true; break }
+                code = minimum(code, Int32(8191))
+            }
             frames.append(code)
             if i % 64 == 63 { Memory.clearCache() }
         }

@@ -20,8 +20,13 @@
 //                  6 × 3072, adaLN-single) flow matching, 10 Euler steps, CFG 1.25, 29.76 s windows at hop 320 frames with the
 //                  104-latent in-context carry; SQ-Codec decoder (round(9x)/9, up 5·4·4·4·3 ×2 = 1920) per stereo channel;
 //                  linear crossfade of 199 680 samples; −1 dBFS output limiter.
+//   • MLXHeartMuLa — the engine-facing package on `Capability.music` (mlx-engine-swift, contract ≥ 1.56.0): the core surface only
+//                  (caption as tags, lyrics, duration as a cap, seed), Apache-2.0 weights with the grant chain and the measured
+//                  character as notices, tiers bf16 / pre-quantised 8-bit LM × fp32 / fp16 codec with `phys_footprint`
+//                  footprints, non-default beside ACE-Step.
 //   • heartmula-gates — the V1 contract / conv-layout checks and the V2 parity lanes against the torch-MPS goldens
-//                  (Tools/oracle-capture), plus a render lane.
+//                  (Tools/oracle-capture), a render lane, the V2b batch / decode lanes and the V3 validate / envelope / tf32
+//                  lanes (MLXServeEngine register → prepare → run → refusals → evict).
 import PackageDescription
 
 let package = Package(
@@ -29,10 +34,12 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .library(name: "HeartMuLaCore", targets: ["HeartMuLaCore"]),
+        .library(name: "MLXHeartMuLa", targets: ["MLXHeartMuLa"]),
         .executable(name: "heartmula-gates", targets: ["heartmula-gates"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.32.3"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.72.0"),
     ],
     targets: [
         .target(
@@ -46,10 +53,22 @@ let package = Package(
             path: "Sources/HeartMuLaCore",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .target(
+            name: "MLXHeartMuLa",
+            dependencies: [
+                "HeartMuLaCore",
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Sources/MLXHeartMuLa",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "heartmula-gates",
             dependencies: [
-                "HeartMuLaCore",
+                "HeartMuLaCore", "MLXHeartMuLa",
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLXServeCore", package: "mlx-engine-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
@@ -61,6 +80,15 @@ let package = Package(
             name: "HeartMuLaCoreTests",
             dependencies: ["HeartMuLaCore"],
             path: "Tests/HeartMuLaCoreTests"
+        ),
+        .testTarget(
+            name: "MLXHeartMuLaTests",
+            dependencies: [
+                "HeartMuLaCore", "MLXHeartMuLa",
+                .product(name: "MLXServeConformance", package: "mlx-engine-swift"),
+                .product(name: "MLXServeCore", package: "mlx-engine-swift"),
+            ],
+            path: "Tests/MLXHeartMuLaTests"
         ),
     ]
 )

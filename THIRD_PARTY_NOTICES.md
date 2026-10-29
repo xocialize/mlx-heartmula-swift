@@ -9,6 +9,7 @@
 | torchtune | 0.4.0 (`llama3_2` builders, `Llama3ScaledRoPE`, `MultiHeadAttention`) | BSD-3-Clause | the backbone / local-decoder semantics (interleaved RoPE, Llama-3 scaling, fp32 RMSNorm) are reproduced; no code copied |
 | vector-quantize-pytorch | 1.27.15 (`ResidualVQ.get_output_from_indices`) | MIT | the RVQ lookup semantics are reproduced |
 | mlx-swift | ml-explore/mlx-swift 0.32.3 | MIT | runtime |
+| mlx-engine-swift | xocialize/mlx-engine-swift 0.73.0 (`MLXToolKit`, `MLXServeCore`, `MLXServeConformance`) | MIT | the engine contract `MLXHeartMuLa` implements; the coordinator the V3 lanes drive |
 | BPE tokenizer, NPY / WAV / WeightIO / Footprint helpers | mlx-minimax-music3-swift / mlx-ace-step-swift / mlx-yue2-swift (fleet, MIT) | MIT | lifted in shape |
 | `Acelogic/heartlib-mlx` | GitHub | **no LICENSE file** (unlicensed) | NOT used — no code read or copied |
 | MuQ-MuLan | `OpenMuQ/MuQ-MuLan-large` | CC-BY-NC-4.0 | NOT on this path — the pipeline feeds a zero 512-d vector (`muq_linear` bias only); reference audio is unsupported upstream |

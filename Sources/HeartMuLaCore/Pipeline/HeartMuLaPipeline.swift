@@ -7,7 +7,7 @@ import MLX
 import MLXNN
 import MLXRandom
 
-public struct MusicRequest: Sendable {
+public struct SongRequest: Sendable {
     public var tags: String
     public var lyrics: String
     public var maxSeconds: Double
@@ -15,14 +15,28 @@ public struct MusicRequest: Sendable {
     public var sampling: SamplingConfig
     public var codecSteps: Int
     public var codecGuidance: Float
+    /// false only for the V3 envelope lane (run to the cap whatever the model says).
+    public var stopOnEndToken: Bool
     public init(tags: String, lyrics: String, maxSeconds: Double = 120, seed: UInt64 = 0, sampling: SamplingConfig = SamplingConfig(),
-                codecSteps: Int = 10, codecGuidance: Float = 1.25) {
+                codecSteps: Int = 10, codecGuidance: Float = 1.25, stopOnEndToken: Bool = true) {
         self.tags = tags; self.lyrics = lyrics; self.maxSeconds = maxSeconds; self.seed = seed; self.sampling = sampling
-        self.codecSteps = codecSteps; self.codecGuidance = codecGuidance
+        self.codecSteps = codecSteps; self.codecGuidance = codecGuidance; self.stopOnEndToken = stopOnEndToken
+    }
+
+    /// heartlib's `max_audio_length_ms`, rounded to the millisecond.
+    public var maxMs: Int { Int((maxSeconds * 1000).rounded()) }
+    /// LM frames the cap allows: the first frame plus `maxMs / 80` more (heartlib's `max_audio_frames`) — so heartlib's 120 s
+    /// cap yields up to 1 501 frames, 120.08 s. A host that wants `maxSeconds` to bound the audio passes
+    /// `SongRequest.lmSeconds(cappingAudioAt:)`.
+    public var maxFrames: Int { maxMs / 80 + 1 }
+
+    /// The `maxSeconds` whose rollout yields at most `floor(seconds × 12.5)` frames, i.e. audio no longer than `seconds`.
+    public static func lmSeconds(cappingAudioAt seconds: Double) -> Double {
+        Double(max(1, Int((seconds * 12.5).rounded(.down))) - 1) * 0.08
     }
 }
 
-public struct MusicResult {
+public struct SongResult {
     public let audio: MLXArray          // (2, samples) fp32, limited
     public let codes: MLXArray          // (8, F) int32 — the rollout the codec decoded
     public let sampleRate: Int
@@ -80,31 +94,45 @@ public final class HeartMuLaPipeline {
         try WeightIO.apply(all, to: module, component: component)
     }
 
-    public func prompt(_ r: MusicRequest) -> HeartMuLaPrompt {
+    public func prompt(_ r: SongRequest) -> HeartMuLaPrompt {
         PromptBuilder.build(tags: r.tags, lyrics: r.lyrics, tokenizer: tokenizer, config: genConfig)
     }
 
-    public func generate(_ r: MusicRequest, progress: ((String, Int, Int) -> Bool)? = nil) throws -> MusicResult {
+    /// The backbone's context (torchtune `max_seq_len` 8 192): the prompt plus every frame must fit.
+    public static let maxPositions = 8192
+
+    /// `progress` sees every LM frame, Euler step and SQ-Codec window; `isCancelled` is probed at each of those seams and
+    /// ends the run with `HeartMuLaError.cancelled`.
+    public func generate(_ r: SongRequest, progress: ((HeartMuLaProgress) -> Void)? = nil,
+                         isCancelled: (() -> Bool)? = nil) throws -> SongResult {
         let p = prompt(r)
+        guard p.length + r.maxFrames <= Self.maxPositions else {
+            throw HeartMuLaError.invalidInput("the prompt (\(p.length) positions) plus \(r.maxFrames) frames exceeds the backbone's \(Self.maxPositions) positions — shorten the lyrics or the cap")
+        }
         let noise = MLXNoise(seed: r.seed)
-        let maxMs = Int(r.maxSeconds * 1000)
+        let maxMs = r.maxMs
+        let lmFrames = maxMs / 80
         let gen = try Rollout.generate(model: lm, prompt: p, maxMs: maxMs, sampling: r.sampling, noise: noise,
-                                       audioEOS: genConfig.audio_eos_id,
-                                       progress: progress.map { cb in { i in cb("lm", i, maxMs / 80) } })
+                                       audioEOS: genConfig.audio_eos_id, stopOnEndToken: r.stopOnEndToken,
+                                       progress: { i in
+                                           progress?(.generate(frame: i, maxFrames: lmFrames))
+                                           return !(isCancelled?() ?? false)
+                                       })
         Memory.clearCache()
+        if isCancelled?() ?? false { throw HeartMuLaError.cancelled("cancelled before the codec") }
         let dec = try decode(codes: gen.codes, seed: r.seed, steps: r.codecSteps, guidance: r.codecGuidance,
-                             progress: progress.map { cb in { w, n in cb("codec", w, n) } })
+                             progress: { s in progress?(s); return !(isCancelled?() ?? false) })
         let (det, audio, peak, gain) = (dec.result, dec.audio, dec.rawPeak, dec.gain)
-        return MusicResult(audio: audio, codes: gen.codes, sampleRate: 48_000, frames: gen.frames, endedOnEndToken: gen.endedOnEndToken,
-                           effectiveSeconds: Double(audio.dim(1)) / 48_000, rawPeak: peak, limiterGain: gain,
-                           promptTokens: p.length, lmSeconds: gen.seconds, prefillSeconds: gen.prefillSeconds,
-                           ditSeconds: det.windowSeconds, sqSeconds: det.sqSeconds)
+        return SongResult(audio: audio, codes: gen.codes, sampleRate: 48_000, frames: gen.frames, endedOnEndToken: gen.endedOnEndToken,
+                          effectiveSeconds: Double(audio.dim(1)) / 48_000, rawPeak: peak, limiterGain: gain,
+                          promptTokens: p.length, lmSeconds: gen.seconds, prefillSeconds: gen.prefillSeconds,
+                          ditSeconds: det.windowSeconds, sqSeconds: det.sqSeconds)
     }
 
     /// The codec stage alone: codes (8, F) → limited audio. Its noise comes from MLX's generator re-seeded with
     /// `codecSeed(seed)`, independent of the LM's stream, so saved codes decode to the same audio again (the V2b `c16` tier).
     public func decode(codes: MLXArray, seed: UInt64, steps: Int = 10, guidance: Float = 1.25,
-                       progress: ((Int, Int) -> Bool)? = nil) throws
+                       progress: ((HeartMuLaProgress) -> Bool)? = nil) throws
         -> (result: DetokenizeResult, audio: MLXArray, rawPeak: Float, gain: Float) {
         MLXRandom.seed(Self.codecSeed(seed))
         let det = try Detokenizer.run(codec: codec, codes: codes, steps: steps, guidance: guidance,

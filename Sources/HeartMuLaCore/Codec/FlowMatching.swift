@@ -61,26 +61,30 @@ public final class FlowMatching: Module {
     /// `inference_codes` (scenario "other_seg") with the noise supplied: codes (B, 8, T), trueLatents (B, 2T, 256),
     /// noise (B, 2T, 256) → latents (B, 2T, 256).
     public func inferenceCodes(_ codes: MLXArray, trueLatents: MLXArray, latentLength: Int, incontextLength: Int,
-                               noise: MLXArray, guidance: Float, steps: Int) -> MLXArray {
+                               noise: MLXArray, guidance: Float, steps: Int, onStep: ((Int) -> Bool)? = nil) throws -> MLXArray {
         let mu = condition(codes, latentLength: latentLength)
         let n = mu.dim(1)
         let isCtx = (MLXArray(Int32(0) ..< Int32(n)) .< Int32(min(incontextLength, latentLength))).reshaped(1, n, 1)
         let ictx = trueLatents * isCtx.asType(trueLatents.dtype)
-        var x = solve(noise: noise, incontext: ictx, incontextLength: incontextLength, mu: mu, guidance: guidance, steps: steps)
+        var x = try solve(noise: noise, incontext: ictx, incontextLength: incontextLength, mu: mu, guidance: guidance, steps: steps,
+                          onStep: onStep)
         if incontextLength > 0 {
             x = concatenated([ictx[0..., ..<incontextLength, 0...], x[0..., incontextLength..., 0...]], axis: 1)
         }
         return x
     }
 
-    /// `solve_euler` with torch's fp32 time arithmetic.
-    public func solve(noise: MLXArray, incontext: MLXArray, incontextLength L: Int, mu: MLXArray, guidance: Float, steps: Int) -> MLXArray {
+    /// `solve_euler` with torch's fp32 time arithmetic. `onStep(step)` runs before each Euler step (1-based) and may cancel by
+    /// returning false — a probe only, the arithmetic is unchanged.
+    public func solve(noise: MLXArray, incontext: MLXArray, incontextLength L: Int, mu: MLXArray, guidance: Float, steps: Int,
+                      onStep: ((Int) -> Bool)? = nil) throws -> MLXArray {
         let span: [Float] = (0 ... steps).map { Float($0) / Float(steps) }       // torch.linspace(0, 1, steps + 1) in fp32
         var t = span[0]
         var dt = span[1] - span[0]
         var x = noise
         let b = x.dim(0)
         for step in 1 ... steps {
+            if let onStep, !onStep(step) { throw HeartMuLaError.cancelled("flow matching cancelled at step \(step)") }
             if L > 0 {
                 let head = (1 - (1 - Float(1e-6)) * t) * noise[0..., ..<L, 0...] + t * incontext[0..., ..<L, 0...]
                 x = concatenated([head, x[0..., L..., 0...]], axis: 1)

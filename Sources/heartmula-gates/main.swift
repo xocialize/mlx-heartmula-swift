@@ -8,6 +8,7 @@
 //   qcheck    <lm-bf16> <lm-quantised>            V2b: S0 on the quantised model + tensors == MLX.quantized(bf16), bit-equal
 //   batch     <lm> <codec> <prompts.json> <outdir> [--tier name] [--cfg 1.5] [--max 120]   V2b: every row, WAV + codes + manifest
 //   decode    <lm> <codec> <codes-dir> <outdir> [--tier name]   V2b: re-decode a batch's saved codes (same codec noise)
+//   validate / envelope / tf32probe / tf32policy   V3: the engine-package lanes (V3.swift)
 // Run the fp32 lanes with MLX_ENABLE_TF32=0. relL2 = ‖Δ‖₂/‖ref‖₂, SNR dB = −20·log₁₀ relL2.
 import Foundation
 import HeartMuLaCore
@@ -288,7 +289,7 @@ func core() throws {
             tl = concatenated([swiftLat[0][0..., (744 - 104)..., 0...], MLXArray.zeros([1, 640, 256], dtype: cdt)], axis: 1)
         }
         let t0 = Date()
-        let out = fm.inferenceCodes(wc, trueLatents: tl, latentLength: 744, incontextLength: w == 0 ? 0 : 104,
+        let out = try fm.inferenceCodes(wc, trueLatents: tl, latentLength: 744, incontextLength: w == 0 ? 0 : 104,
                                     noise: noises[w].asType(cdt), guidance: 1.25, steps: 10)
         eval(out)
         let secs = Date().timeIntervalSince(t0)
@@ -336,7 +337,7 @@ func core() throws {
         }
         detail += "; grid disagreements \(mism) (non-tie \(nonTie))"
         if !pass && n && nonTie == 0 && mism > 0 {
-            let a2 = Detokenizer.assemble(codec: codec, latents: subst, frames: dcodes.dim(1))
+            let a2 = try Detokenizer.assemble(codec: codec, latents: subst, frames: dcodes.dim(1))
             let r2 = relL2(a2, gw)
             detail += "; golden grid substituted at the \(mism) ties → SNR \(String(format: "%.1f", snr(r2))) dB"
             pass = snr(r2) >= 80
@@ -359,15 +360,14 @@ func render() throws {
     let prompts = (try ConfigIO.json(url(rest[2]))["prompts"] as! [[String: Any]])
     guard let row = prompts.first(where: { ($0["id"] as! String).hasPrefix(rest[3]) }) else { print("no row \(rest[3])"); exit(2) }
     let tags = (row["style"] as! String).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.joined(separator: ",")
-    let req = MusicRequest(tags: tags, lyrics: row["lyrics"] as! String, maxSeconds: maxSeconds, seed: seed,
+    let req = SongRequest(tags: tags, lyrics: row["lyrics"] as! String, maxSeconds: maxSeconds, seed: seed,
                            sampling: SamplingConfig(cfgScale: cfgScale))
     log("render \(row["id"]!) cap \(maxSeconds)s seed \(seed) cfg \(cfgScale); tags \(tags)")
     let t0 = Date()
     var lastLog = Date()
-    let r = try pipe.generate(req) { stage, i, n in
-        if Date().timeIntervalSince(lastLog) > 15 { log("  \(stage) \(i)/\(n)"); lastLog = Date() }
-        return true
-    }
+    let r = try pipe.generate(req, progress: { p in
+        if Date().timeIntervalSince(lastLog) > 15 { log("  \(p)"); lastLog = Date() }
+    })
     let wall = Date().timeIntervalSince(t0)
     let peak = sampler.stop()
     let a = r.audio.transposed(1, 0).asArray(Float.self)
@@ -506,7 +506,7 @@ func batch() throws {
     for row in try batchRows(url(rest[2])) where !done.contains(row.id) {
         sampler.resetPeak()
         let t0 = Date()
-        let r = try pipe.generate(MusicRequest(tags: row.tags, lyrics: row.lyrics, maxSeconds: maxSeconds, seed: row.seed,
+        let r = try pipe.generate(SongRequest(tags: row.tags, lyrics: row.lyrics, maxSeconds: maxSeconds, seed: row.seed,
                                                sampling: SamplingConfig(cfgScale: cfgScale)))
         let wall = Date().timeIntervalSince(t0)
         let wav = out.appendingPathComponent("\(row.id).wav")
@@ -591,6 +591,16 @@ do {
     case "tokenizer": try tokenizerLane()
     case "core": try core()
     case "render": try render()
+    case "validate":
+        guard rest.count == 5 else { print("validate <lm> <codec> <prompts.json> <id> <outdir>"); exit(2) }
+        exit(try await runValidate(url(rest[0]), url(rest[1]), url(rest[2]), rest[3], url(rest[4]), seed: seed, cap: maxSeconds))
+    case "envelope":
+        guard rest.count == 3 else { print("envelope <lm> <codec> <prompts.json>"); exit(2) }
+        try runEnvelope(url(rest[0]), url(rest[1]), url(rest[2])); exit(0)
+    case "tf32probe": runTF32Probe(); exit(0)
+    case "tf32policy":
+        guard rest.count == 2 else { print("tf32policy <lm> <codec>"); exit(2) }
+        exit(await runTF32Policy(url(rest[0]), url(rest[1])))
     default: print("unknown command \(cmd)"); exit(2)
     }
 } catch {

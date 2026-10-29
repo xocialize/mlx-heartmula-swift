@@ -11,13 +11,15 @@ transformers 4.57.0, tokenizers 0.22.1, vector-quantize-pytorch 1.27.15, heartli
 | `convert/gate_v1.py` | **V1 gate (a)+(d).** Every bundle tensor bit-equal to the torch module's own (the LM `.to(bf16)`; the codec's parametrized `.weight` transposed, fp32 and `.to(fp16)`); files present; writes the conv references for clause (b). `--ckpt --weights --refs` |
 
 | `harness/run_tiers.sh` | **V2b renders.** bf16 / lm8 / lm4 × draws A, B (12 songs each), c16 (the bf16 codes re-decoded with the fp16 codec, same noise), cfg3 (bf16 at CFG 3.0, draw A), one process at a time with a 10 s overlap log; `MLX_ENABLE_TF32=0`. Writes `WIP/heartmula-eval/_out/heartmula-swift-<tier>-<a\|b>/` in the V0 harness's manifest shape. |
+| `harness/run_v3.sh` | **V3 lanes.** `validate` (MLXServeEngine register → prepare → one 120 s song → refusals → evict) then `envelope` (240 s, end token ignored) for each offered pairing (LM int8 / bf16 × codec fp16 / fp32), one process at a time: waits for the GPU to be free before each lane and logs overlaps every 5 s (`receipts/v3_overlap.log`); `MLX_ENABLE_TF32=0`. |
 | `harness/summarize_tiers.py`, `harness/style_fit_tiers.py` | V2b summary (pooled tables, the pre-registered rules) and the V0 CLAP style instrument over any `_out/<system>`; versioned here, RUN from `WIP/heartmula-eval/harness/` (they import its `common.py`). Scoring is the V0 `score.py`, byte-unchanged. |
 
 Swift-side lanes are `heartmula-gates` subcommands (header of `Sources/heartmula-gates/main.swift`): `contract` (S0),
 `convcheck` (V1 b), `tokenizer` (T), `core` (S E P L F N W Q D), `render`, and for V2b `quantize` (the pre-quantised 8- / 4-bit
 LM bundles: the 217 layer Linears affine g64 via `MLX.quantized`), `qcheck` (S0 on the quantised model + bit-equality with
 `MLX.quantized` of the bf16 weights), `batch` (every row of a prompts file → WAV + `.codes.bin` + manifest) and `decode` (a
-batch's saved codes through another codec bundle with the same codec noise). Build with the Xcode build system so the MLX
+batch's saved codes through another codec bundle with the same codec noise), and for V3 `validate`, `envelope` and `tf32probe`
+(what MLX latched: a 256³ fp32 matmul on the GPU vs the CPU stream, `Sources/heartmula-gates/V3.swift`). Build with the Xcode build system so the MLX
 metallib ships: `swift build -c release --build-system swiftbuild`. **Run every lane and every render with
 `MLX_ENABLE_TF32=0`**: with MLX's default TF32 matmuls the fp32 codec drifts 1e-3 from torch and the SQ-Codec's
 `round(9x)/9` grid amplifies it to 25–30 dB end to end (V2, `receipts/core-shipped-tf32on-*.log`).

@@ -10,8 +10,9 @@ W=$A/WIP/heartmula-port/weights; O=$A/WIP/heartmula-eval/_out; L=$A/WIP/heartmul
 mkdir -p $L
 export MLX_ENABLE_TF32=0
 ( while true; do
-    # by executable name: any *-gates binary but ours, any python whose arguments look like a model job
-    o=$(ps -Ao pid=,comm=,args= | awk '($2 ~ /-gates$/ && $2 !~ /heartmula-gates$/) || ($2 ~ /[Pp]ython/ && $0 ~ /(torch|mlx|harness|eval|run_|dump|score|generate)/)' | cut -c1-200)
+    # on the full arguments (macOS truncates `comm` when `args` follows it — AB-L-0317; the V2b run used `comm` and could not
+    # see a Gaea worker): any *-gates binary but ours, any *-worker, any python whose arguments look like a model job
+    o=$(ps -Ao pid=,args= | awk '$0 ~ /-worker( |$)/ || ($0 ~ /-gates( |$)/ && $0 !~ /heartmula-gates/) || ($0 ~ /[Pp]ython/ && $0 ~ /(torch|mlx|harness|eval|run_|dump|score|generate)/)' | grep -v awk | cut -c1-200)
     [ -n "$o" ] && echo "$(date +%H:%M:%S) OVERLAP $o" >> $L/v2b_overlap.log
     sleep 10
   done ) &

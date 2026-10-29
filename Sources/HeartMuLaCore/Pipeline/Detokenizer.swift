@@ -50,9 +50,21 @@ public struct DetokenizeResult {
     public let sqSeconds: Double
 }
 
+/// Where a song is, for a host's progress bar and its cancellation probe.
+public enum HeartMuLaProgress: Sendable, Equatable {
+    /// LM frame `frame` (0-based) of at most `maxFrames` (the cap at 12.5 Hz).
+    case generate(frame: Int, maxFrames: Int)
+    /// Euler step `step` (1-based) of `steps`, in codec window `window` (0-based) of `windows`.
+    case denoise(window: Int, windows: Int, step: Int, steps: Int)
+    /// SQ-Codec window `window` (0-based) of `windows`.
+    case decode(window: Int, windows: Int)
+}
+
 public enum Detokenizer {
+    /// `progress` sees every Euler step of every window (`.denoise`) and every SQ-Codec window (`.decode`); returning false
+    /// cancels at that seam.
     public static func run(codec: HeartCodecModel, codes: MLXArray, steps: Int = 10, guidance: Float = 1.25,
-                           noise: (Int, [Int]) -> MLXArray, progress: ((Int, Int) -> Bool)? = nil) throws -> DetokenizeResult {
+                           noise: (Int, [Int]) -> MLXArray, progress: ((HeartMuLaProgress) -> Bool)? = nil) throws -> DetokenizeResult {
         let f = codes.dim(1)
         let idx = CodecWindowing.paddedIndices(frames: f)
         let padded = take(codes, MLXArray(idx.map { Int32($0) }), axis: 1).expandedDimensions(axis: 0)   // (1, 8, N)
@@ -63,37 +75,40 @@ public enum Detokenizer {
         var latents: [MLXArray] = []
         var times: [Double] = []
         for (w, s) in starts.enumerated() {
-            if let progress, !progress(w, starts.count) { throw HeartMuLaError.cancelled("detokenize cancelled at window \(w)") }
             let t0 = Date()
             let c = padded[0..., 0..., s ..< (s + CodecWindowing.minFrames)]
             let z = noise(w, [1, L, fm.latentDim]).asType(dtype)
+            let onStep = progress.map { cb in { (step: Int) in cb(.denoise(window: w, windows: starts.count, step: step, steps: steps)) } }
             let out: MLXArray
             if w == 0 {
-                out = fm.inferenceCodes(c, trueLatents: MLXArray.zeros([1, L, fm.latentDim], dtype: dtype), latentLength: L,
-                                        incontextLength: 0, noise: z, guidance: guidance, steps: steps)
+                out = try fm.inferenceCodes(c, trueLatents: MLXArray.zeros([1, L, fm.latentDim], dtype: dtype), latentLength: L,
+                                            incontextLength: 0, noise: z, guidance: guidance, steps: steps, onStep: onStep)
             } else {
                 let carry = latents[w - 1][0..., (L - CodecWindowing.overlapLatents)..., 0...]
                 let tl = concatenated([carry, MLXArray.zeros([1, L - CodecWindowing.overlapLatents, fm.latentDim], dtype: dtype)], axis: 1)
-                out = fm.inferenceCodes(c, trueLatents: tl, latentLength: L, incontextLength: CodecWindowing.overlapLatents,
-                                        noise: z, guidance: guidance, steps: steps)
+                out = try fm.inferenceCodes(c, trueLatents: tl, latentLength: L, incontextLength: CodecWindowing.overlapLatents,
+                                            noise: z, guidance: guidance, steps: steps, onStep: onStep)
             }
             eval(out)
             latents.append(out)
             times.append(Date().timeIntervalSince(t0))
         }
         let t1 = Date()
-        let audio = assemble(codec: codec, latents: latents, frames: f)
+        let audio = try assemble(codec: codec, latents: latents, frames: f,
+                                 onWindow: progress.map { cb in { w in cb(.decode(window: w, windows: latents.count)) } })
         return DetokenizeResult(audio: audio, windowLatents: latents, windowSeconds: times, sqSeconds: Date().timeIntervalSince(t1))
     }
 
     /// SQ-Codec per window, the float64 linear crossfade, the cut to int(F / 12.5 · 48 000) samples → (2, samples) fp32.
-    public static func assemble(codec: HeartCodecModel, latents: [MLXArray], frames f: Int) -> MLXArray {
+    public static func assemble(codec: HeartCodecModel, latents: [MLXArray], frames f: Int,
+                                onWindow: ((Int) -> Bool)? = nil) throws -> MLXArray {
         var output: [[Float]] = [[], []]
         let ov = CodecWindowing.overlapSamples
         // numpy linspace(0, 1, ov) in float64: start + i·step, last = stop
         let step = 1.0 / Double(ov - 1)
         let fadeIn: [Double] = (0 ..< ov).map { $0 == ov - 1 ? 1.0 : Double($0) * step }
-        for lat in latents {
+        for (w, lat) in latents.enumerated() {
+            if let onWindow, !onWindow(w) { throw HeartMuLaError.cancelled("SQ-Codec decode cancelled at window \(w)") }
             let wav = decodeWindow(codec: codec, latents: lat)                                   // (2, windowSamples)
             eval(wav)
             let a = wav.asType(.float32)
