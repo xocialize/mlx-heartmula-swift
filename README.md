@@ -22,7 +22,7 @@ applies a −1 dBFS limiter.
 ## Install
 
 ```swift
-.package(url: "https://github.com/xocialize/mlx-heartmula-swift", from: "0.1.0")
+.package(url: "https://github.com/xocialize/mlx-heartmula-swift", from: "0.1.1")
 // products: "MLXHeartMuLa" (the MLXEngine package), "HeartMuLaCore" (the model alone)
 ```
 

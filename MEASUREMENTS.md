@@ -555,3 +555,50 @@ footprints measured and declared: **default int8 LM + fp16 codec, 8.5 + 5.5 GB �
 int8 + fp32 21.5 GB (32 GB Macs); bf16 + fp32 24.5 GB (48 GB). Apache-2.0, non-default beside ACE-Step, the measured character in
 the notices. Hosts call `HeartMuLaPackage.configureProcess()` at engine start for the fp32 codec; the default tier is
 TF32-immune. Nothing pushed or published; V4 is the operator's call.
+
+## V4 — published (2026-11-01, the operator's decision AB-D-0203)
+
+The operator: "Publish V4" — after the listening pass over the V2b takes found no defects (relayed by the music research
+session; recorded as AB-D-0203, modelled on YuE2's AB-D-0186, with Apache-2.0 weights instead of non-commercial ones).
+
+**Code:** [github.com/xocialize/mlx-heartmula-swift](https://github.com/xocialize/mlx-heartmula-swift), public, MIT. Tags
+`v0.1.0` (`79b0c47`) and **`v0.1.1`** (`f3d1f83`, use `from: "0.1.1"`); products `MLXHeartMuLa`, `HeartMuLaCore`; depends on
+mlx-swift ≥ 0.32.3 and mlx-engine-swift ≥ 0.72.0. **v0.1.0 has a defect, fixed in v0.1.1:** its declared download globs
+(`config.json`, `*.safetensors`, `tokenizer.json`, `gen_config.json`) did not carry `model.safetensors.index.json`, so an engine
+download of the two SHARDED repos (bf16 LM, fp32 codec) could not load (`missing file … model.safetensors`); the default pairing
+(both single-file) was unaffected. Found by the fresh-download check below (log `receipts/v4-published-artifact-check-v0.1.0.log`);
+v0.1.1 declares `*.json` + `*.safetensors` and its layout test now asserts that every file the loader opens is declared. The
+v0.1.0 tag stays (it was public); the README and cards point at 0.1.1.
+
+**Weights** (Apache-2.0; the names `HeartMuLaConfiguration` declares, pinned at the weight commits):
+
+| repo @ pinned commit | contents | size |
+|---|---|---|
+| [`mlx-community/HeartMuLa-oss-3B-8bit`](https://huggingface.co/mlx-community/HeartMuLa-oss-3B-8bit) @ `ff4fbf6` | the LM, pre-quantised 8-bit (723 tensors: 217 quantised Linears), tokenizer, gen config — the default | 4.94 GB |
+| [`mlx-community/HeartMuLa-oss-3B-bf16`](https://huggingface.co/mlx-community/HeartMuLa-oss-3B-bf16) @ `625d8d0` | the LM, bf16 (289 tensors, 2 shards + index), tokenizer, gen config | 7.88 GB |
+| [`mlx-community/HeartCodec-oss-fp16`](https://huggingface.co/mlx-community/HeartCodec-oss-fp16) @ `5865bd0` | the codec decoder, fp16 (506 tensors) — the default | 3.15 GB |
+| [`mlx-community/HeartCodec-oss-fp32`](https://huggingface.co/mlx-community/HeartCodec-oss-fp32) @ `a03fdf4` | the codec decoder, fp32 (506 tensors, 2 shards + index) | 6.29 GB |
+
+Each repo ships heartlib's Apache-2.0 text as `LICENSE`, a `NOTICE` (the gated bundle's grant chain — no LICENSE file in the
+generator repos, the card + heartlib's README of 2026-01-20, the Llama-3.2 tokenizer vocabulary — plus the Apache §4 statement of
+exactly what changed and "not endorsed by the HeartMuLa team or MuLa Labs"), and a card (`license: apache-2.0`, `base_model` the
+HeartMuLa repo, `library_name: mlx`) with its own Use section written for that repo (the default 8-bit LM; the bf16 LM choice; the
+default fp16 codec, TF32-immune; the fp32 codec with the TF32 requirement), the declared footprints, the measured character (weak
+style tags, the male-voice gap, the 8-bit cap rate 10/24 vs 5/24 with its one loop, weak and uneven Mandarin) and a link to the
+Swift package. Not published: the 4-bit LM (V2b Q4 FAIL). A second commit on each repo's `main` changed only `README.md`
+(`from: "0.1.1"`); the pins are the weight commits. Cards and NOTICEs as uploaded: `WIP/heartmula-port/publish/*/`.
+
+**Published-artifact check** (`receipts/v4-published-artifact-check.log`, `v4-fresh-validate-{int8-fp16,bf16-fp32}.log`): a
+fresh `git clone --branch v0.1.1` built from scratch; `heartmula-gates validate --store <empty dir>` hands the engine that models
+root (`useModelStore`), the package declares its pinned repos, and **the engine's own materializer downloads them** (no `hf`
+pre-download), then the V3 checks run:
+
+| pairing | download (engine) | phys after prepare / engine charges | peak | song | refusals | result |
+|---|---|---|---|---|---|---|
+| int8 + fp16 (default) | 8-bit LM + fp16 codec, 153.5 s | 8.34 / 8.50 GB | 12.21 GB | 70.24 s, **byte-identical to V3's** | 10 / 10 | PASS |
+| bf16 + fp32 | bf16 LM + fp32 codec, 287.0 s | 14.42 / 14.50 GB | 21.54 GB | 97.36 s, **byte-identical to V3's** | 10 / 10 | PASS |
+
+`needsDownload` true on the empty store, false after; 0 licence advisories. **sha256 of every downloaded weight / config file ==
+the gated bundle: 16 / 16, 0 mismatches** (`receipts/v4-gated-sha256.txt` vs `v4-fresh-sha256.txt`). The two runs together
+downloaded all four repos, so every published byte the package loads is the gated byte, end to end. Both runs started with no
+other model process on the GPU (full-args watcher, AB-L-0317).
