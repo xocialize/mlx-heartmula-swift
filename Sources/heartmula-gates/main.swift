@@ -8,7 +8,8 @@
 //   qcheck    <lm-bf16> <lm-quantised>            V2b: S0 on the quantised model + tensors == MLX.quantized(bf16), bit-equal
 //   batch     <lm> <codec> <prompts.json> <outdir> [--tier name] [--cfg 1.5] [--max 120]   V2b: every row, WAV + codes + manifest
 //   decode    <lm> <codec> <codes-dir> <outdir> [--tier name]   V2b: re-decode a batch's saved codes (same codec noise)
-//   validate / envelope / tf32probe / tf32policy   V3: the engine-package lanes (V3.swift)
+//   validate / envelope / tf32probe / tf32policy   V3: the engine-package lanes (V3.swift); validate --store <root>
+//             [--lm-quant int8|bf16] [--codec fp16|fp32]: V4, the published repos through the engine's own download
 // Run the fp32 lanes with MLX_ENABLE_TF32=0. relL2 = ‖Δ‖₂/‖ref‖₂, SNR dB = −20·log₁₀ relL2.
 import Foundation
 import HeartMuLaCore
@@ -29,6 +30,11 @@ let cfgScale = Float(opt("--cfg", "1.5"))!
 let cacheGB = Double(opt("--cache-gb", "2"))!
 let bitsOpt = Int(opt("--bits", "8"))!
 let tierName = opt("--tier", "")
+let storeOpt = opt("--store", "")
+if !storeOpt.isEmpty {
+    storeRoot = URL(fileURLWithPath: storeOpt)
+    storePairing = (opt("--lm-quant", "int8") == "bf16" ? .bf16 : .int8, opt("--codec", "fp16") == "fp32" ? .fp32 : .fp16)
+}
 Memory.cacheLimit = Int(cacheGB * Double(1 << 30))
 guard let cmd = args.first else { print("usage: see header"); exit(2) }
 let rest = Array(args.dropFirst())

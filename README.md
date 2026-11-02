@@ -10,10 +10,30 @@ switch covers "all related model weights"); the generator repos carry no LICENSE
 vocabulary. Every bundle the converter writes carries heartlib's Apache-2.0 text and a NOTICE with the grant chain
 (`THIRD_PARTY_NOTICES.md`).
 
-**Character, declared (V0 + listening pass).** Lyrics are followed closely (English PER 0.107; Mandarin 0.457 with one lost
-verse); the aesthetics proxy scores it highest of the slot on content enjoyment (CE 7.76). Tags steer it least of the slot
-(CLAP style retrieval rank 5.42 vs ≈ 2), and it has a voice-gender gap — 11 of 12 V0 takes sound female, 1 of 6 male-voice
-rows got a male voice. Raw codec output peaks above full scale (to 1.37), so the pipeline applies a −1 dBFS limiter.
+**Character, declared (V0, the listening passes, V2b).** Lyrics are followed closely in English: PER 0.125 with the bf16 LM
+and 0.132 with the 8-bit LM on the fleet's 12 songs, against the PyTorch reference's 0.165. The aesthetics proxy scores it
+highest of the slot on content enjoyment (CE 7.76). Tags steer it least of the slot: CLAP style retrieval rank about 4.5
+(PyTorch reference 5.42) against ≈ 2 for the other music models, and CFG 3.0 doesn't help. It has a voice-gender gap: 11 of
+12 V0 takes sound female, and 1 of 6 male-voice rows got a male voice. Mandarin is weak and uneven (reference PER 0.457 with
+one lost verse). The 8-bit LM runs to the length cap twice as often as bf16 (10 of 24 songs against 5 of 24): the lyrics are
+sung, then choruses repeat, and one take looped a line. Raw codec output peaks above full scale (to 1.37), so the pipeline
+applies a −1 dBFS limiter.
+
+## Install
+
+```swift
+.package(url: "https://github.com/xocialize/mlx-heartmula-swift", from: "0.1.0")
+// products: "MLXHeartMuLa" (the MLXEngine package), "HeartMuLaCore" (the model alone)
+```
+
+Weights (Apache-2.0, each hash-equal to the bundle these gates passed, pinned by `HeartMuLaConfiguration`):
+
+| repo | what | size |
+|---|---|---|
+| [mlx-community/HeartMuLa-oss-3B-8bit](https://huggingface.co/mlx-community/HeartMuLa-oss-3B-8bit) | the LM, pre-quantised 8-bit (default) | 4.94 GB |
+| [mlx-community/HeartMuLa-oss-3B-bf16](https://huggingface.co/mlx-community/HeartMuLa-oss-3B-bf16) | the LM, bf16 | 7.88 GB |
+| [mlx-community/HeartCodec-oss-fp16](https://huggingface.co/mlx-community/HeartCodec-oss-fp16) | the codec, fp16 (default) | 3.15 GB |
+| [mlx-community/HeartCodec-oss-fp32](https://huggingface.co/mlx-community/HeartCodec-oss-fp32) | the codec, fp32 (needs TF32 off) | 6.29 GB |
 
 ## What it does
 
@@ -43,13 +63,14 @@ offer: the host keeps ACE-Step as the capability's default and offers this one b
 ```swift
 import MLXHeartMuLa
 import MLXServeCore
+import MLXToolKit
 HeartMuLaPackage.configureProcess()          // at engine start, before ANY model runs: MLX latches MLX_ENABLE_TF32 on the first matmul
 let engine = MLXServeEngine()
+await engine.useModelStore(ModelStore(root: modelsRoot))                       // where the engine keeps downloaded weights
 let id = try await engine.register(HeartMuLaPackage.registration,
-                                   configuration: HeartMuLaConfiguration(quant: .int8, codec: .fp16,          // the default tier
-                                                                         lmDirectory: lm, codecDirectory: codec),
+                                   configuration: HeartMuLaConfiguration(quant: .int8, codec: .fp16),  // the default tier
                                    id: PackageID("heartmula-oss-3b"))
-try await engine.prepare(.music, package: id)
+try await engine.prepare(.music, package: id)                                  // downloads the two pinned repos on first use
 let r = try await engine.run(MusicRequest(caption: "folk, acoustic guitar, female vocal", lyrics: "[verse]\n…",
                                           durationSeconds: 120, seed: 7), package: id) as! MusicResponse
 // r.audio: .wav, 48 kHz stereo, peak ≤ −1 dBFS; its length is the effective duration; r.truncated: the cap ended it
@@ -57,17 +78,26 @@ let r = try await engine.run(MusicRequest(caption: "folk, acoustic guitar, femal
 
 The surface declares the core only — the caption (read as comma-separated tags), lyrics, `durationSeconds` as a **cap** (nil →
 120 s, at most 240 s; the audio never runs past it) and seed — and the engine refuses reference audio, edits, planning, a score,
-anchors and a vocal language before admission. Tiers: LM `.int8` (the pre-quantised bundle) or `.bf16`, codec `.fp16` or
+anchors and a vocal language before admission; an undeclared `guidanceScale` is ignored (the contract's rule). For local
+bundles, pass `lmDirectory:` / `codecDirectory:` instead of a models root. Tiers: LM `.int8` (the pre-quantised bundle) or `.bf16`, codec `.fp16` or
 `.fp32`; the fp32 codec refuses to load if TF32 latched on in the process (the fp16 tiers are byte-identical either way).
 
 ## Status
 
-V1 (converter + goldens), V2 (`HeartMuLaCore` at the pre-registered parity floors), V2b (tiers) and V3 (the `MLXHeartMuLa`
-engine package, admitted through `MLXServeEngine` on all four pairings) — see `MEASUREMENTS.md`. Tiers: bf16 or pre-quantised
-8-bit LM (`HeartMuLa-oss-3B-8bit`, layer Linears affine g64), fp32 or fp16 codec. Declared footprints (phys_footprint, resident +
-activation): **8-bit LM + fp16 codec, the default, 8.5 + 5.5 GB — a 24 GB Mac, RTF ≈ 3 on an M5 Max**; bf16 + fp16 11.5 + 6.0;
-8-bit + fp32 11.5 + 10.0; bf16 + fp32 14.5 + 10.0. 4-bit failed its lyric rule and is not offered. Not yet: V4 publish (the
-weight-source repos in `HeartMuLaConfiguration` are the V4 candidates; today the package loads explicit bundle directories).
+V0–V4 done (task AB-T-0376): V1 converter + goldens, V2 `HeartMuLaCore` at the pre-registered parity floors, V2b tiers, V3 the
+`MLXHeartMuLa` engine package (admitted through `MLXServeEngine` on all four pairings), V4 published (AB-D-0203) — see
+`MEASUREMENTS.md`. Tiers: bf16 or pre-quantised 8-bit LM (layer Linears affine g64), fp32 or fp16 codec. Declared footprints
+(phys_footprint, resident + activation):
+
+| LM + codec | declared | fits (engine 0.7 × RAM) | speed, M5 Max |
+|---|---|---|---|
+| **8-bit + fp16 (default)** | 8.5 + 5.5 GB | 24 GB Mac | 3.0× real time |
+| bf16 + fp16 | 11.5 + 6.0 GB | 32 GB | 2.5× |
+| 8-bit + fp32 | 11.5 + 10.0 GB | 32 GB | 2.3× |
+| bf16 + fp32 | 14.5 + 10.0 GB | 48 GB | 1.85× |
+
+4-bit failed its lyric rule and is not offered or published. Open: the AppKit test-app link (the engine path is proven on the
+CLI consumer path).
 
 ## Build
 

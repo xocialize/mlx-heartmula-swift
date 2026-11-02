@@ -36,23 +36,42 @@ private func row(_ prompts: URL, _ id: String) throws -> [String: Any] {
     return r
 }
 
+/// `store` (V4): no explicit folders — the host hands the engine that models root (`useModelStore`), the package declares its
+/// pinned published repos, and the engine downloads whatever is missing on `prepare` (an empty root: both repos). The pairing
+/// then comes from `storePairing` (`--lm-quant int8|bf16 --codec fp16|fp32`).
+var storeRoot: URL? = nil
+var storePairing: (Quant, HeartMuLaCodecPrecision) = (.int8, .fp16)
+
 func runValidate(_ lm: URL, _ codec: URL, _ prompts: URL, _ id: String, _ outDir: URL, seed: UInt64, cap: Double) async throws -> Int32 {
     try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     let r = try row(prompts, id)
-    let (quant, codecPrecision) = try pairing(lm, codec)
+    let (quant, codecPrecision) = storeRoot == nil ? try pairing(lm, codec) : storePairing
     let tier = "\(quant)-\(codecPrecision.rawValue)"
     print("validate: MLXServeEngine → register → prepare → run (LM \(quant), codec \(codecPrecision.rawValue); MLX_ENABLE_TF32=\(ProcessInfo.processInfo.environment["MLX_ENABLE_TF32"] ?? "unset")) → refusals → evict")
     let sampler = Footprint.Sampler()
     let before = sampler.mark()
     let engine = MLXServeEngine()   // the default policy (.permissiveOnly, .advisory): Apache-2.0 registers with no advisory
+    if let storeRoot { await engine.useModelStore(ModelStore(root: storeRoot)) }
     let t0 = Date()
-    let configuration = HeartMuLaConfiguration(quant: quant, codec: codecPrecision, lmDirectory: lm, codecDirectory: codec,
-                                               cacheLimitBytes: 1 << 30)
+    let configuration = storeRoot.map { HeartMuLaConfiguration(quant: quant, codec: codecPrecision, modelsRootDirectory: $0, cacheLimitBytes: 1 << 30) }
+        ?? HeartMuLaConfiguration(quant: quant, codec: codecPrecision, lmDirectory: lm, codecDirectory: codec, cacheLimitBytes: 1 << 30)
     let pid = try await engine.register(HeartMuLaPackage.registration, configuration: configuration, id: PackageID("heartmula-oss-3b"))
     let advisories = await engine.licenseAdvisories
     check("registered \(pid.rawValue); licence advisories: \(advisories.count)", advisories.isEmpty, advisories.map(\.summary).joined(separator: "; "))
     let needs = await engine.needsDownload(.music, package: pid)
-    check("needsDownload == \(needs) with the explicit bundles", !needs)
+    if let storeRoot {
+        let present = configuration.resolvedBundles(storeRoot: storeRoot) != nil
+        print("  store \(storeRoot.path): \(configuration.weightSources.map { "\($0.repo) @ \(($0.revision ?? "?").prefix(7))" }.joined(separator: ", ")); already present: \(present)")
+        check("needsDownload == \(needs) with \(present ? "a populated" : "an empty") store", needs == !present)
+        let td = Date()
+        _ = try await engine.materialize(package: pid)
+        print(String(format: "  [VAL] engine materialized the pinned repos in %.1fs → %@", Date().timeIntervalSince(td),
+                     configuration.resolvedBundles(storeRoot: storeRoot).map { "\($0.lm.path) + \($0.codec.path)" } ?? "NOTHING"))
+        let after = await engine.needsDownload(.music, package: pid)
+        check("needsDownload == \(after) after materialize", !after)
+    } else {
+        check("needsDownload == \(needs) with the explicit bundles", !needs)
+    }
     try await engine.prepare(.music, package: pid)
     Thread.sleep(forTimeInterval: 0.3)
     let afterLoad = sampler.mark()

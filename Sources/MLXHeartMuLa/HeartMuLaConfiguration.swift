@@ -5,9 +5,9 @@
 // quantize`): the LM (`config.json`, the safetensors, `tokenizer.json`, `gen_config.json`) — bf16 as converted, or PRE-QUANTISED
 // 8-bit (the 217 layer Linears affine group 64, the `quantization` block in its config; nothing is quantised at load) — and the
 // codec (`config.json`, the safetensors) at fp32 or fp16. Every bundle carries heartlib's Apache-2.0 LICENSE and a NOTICE with
-// the grant chain. The repo names below are the V4 candidates: NOTHING is published until the operator decides V4 (AB-T-0376),
-// so today the package loads from explicit directories (`lmDirectory` / `codecDirectory`) and the engine's materializer would
-// find no repo.
+// the grant chain. The four repos below are the V4 publication (AB-D-0203): hash-equal to the gated bundles and pinned to their
+// published commits, so a fresh machine's engine materializes exactly what V1–V3 gated; `lmDirectory` / `codecDirectory` stay
+// the dev escape hatch.
 
 import Foundation
 import HeartMuLaCore
@@ -26,7 +26,7 @@ public struct HeartMuLaConfiguration: PackageConfiguration, ModelStorable, Quant
     /// The LM's precision: `.int8` (the pre-quantised 8-bit bundle, the default) or `.bf16`. Nothing else is offered.
     public var quant: Quant
     public var codec: HeartMuLaCodecPrecision
-    /// Pinned revision of the LM repo / the codec repo; nil = the repo's default branch (nothing is published yet — V4).
+    /// Revision of the LM repo / the codec repo; nil = the published, hash-verified commit (`lmRevisionPin` / `codecRevisionPin`).
     public var revision: String?
     public var codecRevision: String?
     /// Explicit LM bundle directory (the converter's layout) — the dev escape hatch, never touches the network.
@@ -45,12 +45,17 @@ public struct HeartMuLaConfiguration: PackageConfiguration, ModelStorable, Quant
         self.modelsRootDirectory = modelsRootDirectory; self.cacheLimitBytes = cacheLimitBytes
     }
 
-    // MARK: repos (V4 candidates — unpublished; V1 converted from HeartMuLa's own repos)
+    // MARK: repos (published V4, AB-D-0203; V1 converted from HeartMuLa's own repos)
 
     public static let lmBF16Repo = "mlx-community/HeartMuLa-oss-3B-bf16"
     public static let lm8bitRepo = "mlx-community/HeartMuLa-oss-3B-8bit"
     public static let codecFP32Repo = "mlx-community/HeartCodec-oss-fp32"
     public static let codecFP16Repo = "mlx-community/HeartCodec-oss-fp16"
+    /// The published commits (V4), each hash-equal to the gated bundle.
+    public static let lmBF16RevisionPin = "625d8d0edb27b652cbdaba5c6530b8d2ffe29868"
+    public static let lm8bitRevisionPin = "ff4fbf65ed698d58049674c6dc8e0141bfb64b60"
+    public static let codecFP32RevisionPin = "a03fdf4c3735863c347e618b280ebd27a1478c90"
+    public static let codecFP16RevisionPin = "5865bd08de864711a09b40a30fc2208fcb8def62"
     /// The upstream checkpoints the converter read (V1 gated against them).
     public static let upstreamModelRepo = "HeartMuLa/HeartMuLa-oss-3B-happy-new-year"
     public static let upstreamModelRevision = "41f6fc68490e11dc43fdabaa6b5767946408c903"
@@ -74,6 +79,25 @@ public struct HeartMuLaConfiguration: PackageConfiguration, ModelStorable, Quant
         case .fp16: Self.codecFP16Repo
         }
     }
+
+    /// The pinned commit of `lmRepo` (nil for a quant with no bundle).
+    public var lmRevisionPin: String? {
+        switch quant {
+        case .bf16: Self.lmBF16RevisionPin
+        case .int8: Self.lm8bitRevisionPin
+        default: nil
+        }
+    }
+
+    public var codecRevisionPin: String {
+        switch codec {
+        case .fp32: Self.codecFP32RevisionPin
+        case .fp16: Self.codecFP16RevisionPin
+        }
+    }
+
+    public var effectiveRevision: String? { revision ?? lmRevisionPin }
+    public var effectiveCodecRevision: String { codecRevision ?? codecRevisionPin }
 
     // Environment-specific URLs are excluded from Codable.
     private enum CodingKeys: String, CodingKey { case quant, codec, revision, codecRevision, cacheLimitBytes }
@@ -124,8 +148,8 @@ extension HeartMuLaConfiguration: WeightSourcing {
     static let codecProbe = "config.json"
 
     public var weightSources: [WeightSource] {
-        [WeightSource(role: "lm", repo: lmRepo ?? Self.lm8bitRepo, revision: revision, matching: Self.lmFiles),
-         WeightSource(role: "codec", repo: codecRepo, revision: codecRevision, matching: Self.codecFiles)]
+        [WeightSource(role: "lm", repo: lmRepo ?? Self.lm8bitRepo, revision: effectiveRevision ?? Self.lm8bitRevisionPin, matching: Self.lmFiles),
+         WeightSource(role: "codec", repo: codecRepo, revision: effectiveCodecRevision, matching: Self.codecFiles)]
     }
 
     public func missingWeightSources(storeRoot: URL?) -> [WeightSource] {
@@ -151,8 +175,8 @@ extension HeartMuLaConfiguration: WeightSourcing {
             return nil
         }
         guard let lmRepo,
-              let l = dir(lmDirectory, lmRepo, revision, Self.lmProbe),
-              let c = dir(codecDirectory, codecRepo, codecRevision, Self.codecProbe) else { return nil }
+              let l = dir(lmDirectory, lmRepo, effectiveRevision, Self.lmProbe),
+              let c = dir(codecDirectory, codecRepo, effectiveCodecRevision, Self.codecProbe) else { return nil }
         return (l, c)
     }
 }

@@ -4,7 +4,7 @@
 # A 10 s overlap log records any other model process on the GPU (`_logs/v2b_overlap.log`). Resumable (manifest rows skip).
 #   run_tiers.sh <area-root>   (MLX_ENABLE_TF32=0 is set here for every process — AB-L-0315)
 set -u
-A=${1:-/Volumes/Satechi/Development/mlxengine-audio}
+A=${1:?usage: the mlxengine-audio area root as the first argument}
 G=$A/PROD/HeartMuLa/mlx-heartmula-swift/.build/out/Products/Release/heartmula-gates
 W=$A/WIP/heartmula-port/weights; O=$A/WIP/heartmula-eval/_out; L=$A/WIP/heartmula-eval/_logs; C=$A/WIP/acestep-eval/cues
 mkdir -p $L

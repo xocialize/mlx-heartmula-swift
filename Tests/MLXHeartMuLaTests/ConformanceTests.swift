@@ -130,7 +130,7 @@ final class MaterializationConformanceTests: XCTestCase {
         }
     }
 
-    /// Two roles: the LM bundle (bf16 or the pre-quantised 8-bit) and the codec bundle (fp32 or fp16) — the V4 candidate repos.
+    /// Two roles: the LM bundle (bf16 or the pre-quantised 8-bit) and the codec bundle (fp32 or fp16) — the published V4 repos.
     func testWeightSources() {
         let expect: [(Quant, HeartMuLaCodecPrecision, [String])] = [
             (.int8, .fp16, ["mlx-community/HeartMuLa-oss-3B-8bit", "mlx-community/HeartCodec-oss-fp16"]),
@@ -146,6 +146,14 @@ final class MaterializationConformanceTests: XCTestCase {
             XCTAssertEqual(cfg.weightSources[1].matching, HeartMuLaConfiguration.codecFiles)
         }
         XCTAssertNil(HeartMuLaConfiguration(quant: .int4).lmRepo)
+        // nil revisions resolve to the published, hash-verified commits (V4)
+        for (q, c) in [(Quant.int8, HeartMuLaCodecPrecision.fp16), (.int8, .fp32), (.bf16, .fp16), (.bf16, .fp32)] {
+            let cfg = HeartMuLaConfiguration(quant: q, codec: c)
+            XCTAssertEqual(cfg.weightSources.map(\.revision), [cfg.lmRevisionPin, cfg.codecRevisionPin])
+            XCTAssertTrue(cfg.weightSources.allSatisfy { ($0.revision ?? "").count == 40 }, "\(q)-\(c)")
+        }
+        XCTAssertEqual(Set([HeartMuLaConfiguration.lmBF16RevisionPin, HeartMuLaConfiguration.lm8bitRevisionPin,
+                            HeartMuLaConfiguration.codecFP32RevisionPin, HeartMuLaConfiguration.codecFP16RevisionPin]).count, 4)
         XCTAssertEqual(HeartMuLaConfiguration(revision: "abc", codecRevision: "def").weightSources.map(\.revision), ["abc", "def"])
         XCTAssertEqual(HeartMuLaConfiguration().cacheLimitBytes, 1 << 30)
     }

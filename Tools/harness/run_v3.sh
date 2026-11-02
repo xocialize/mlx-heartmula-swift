@@ -6,7 +6,7 @@
 #   run_v3.sh <area-root> [lane-regex] [suffix]   (MLX_ENABLE_TF32=0 for every process — AB-L-0315); e.g. a solo re-time of
 #   three lanes: run_v3.sh <root> 'validate-(int8-fp16|int8-fp32|bf16-fp16)' -retime
 set -u
-A=${1:-/Volumes/Satechi/Development/mlxengine-audio}
+A=${1:?usage: the mlxengine-audio area root as the first argument}
 G=$A/PROD/HeartMuLa/mlx-heartmula-swift/.build/out/Products/Release/heartmula-gates
 ONLY=${2:-.}; SUF=${3:-}
 W=$A/WIP/heartmula-port/weights; R=$A/WIP/heartmula-port/receipts; C=$A/WIP/acestep-eval/cues
