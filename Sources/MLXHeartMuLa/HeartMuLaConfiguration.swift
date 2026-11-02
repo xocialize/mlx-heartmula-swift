@@ -139,10 +139,12 @@ extension HeartMuLaConfiguration: FootprintConfigured {
 // MARK: - Weight sources (auto-materialization, engine MAT gate)
 
 extension HeartMuLaConfiguration: WeightSourcing {
-    /// The files `HeartMuLaPipeline` opens per bundle — the materialization contract (the bf16 LM and fp32 codec are sharded with
-    /// an index; the 8-bit LM and fp16 codec are one file).
-    public static let lmFiles = ["config.json", "*.safetensors", "tokenizer.json", "gen_config.json"]
-    public static let codecFiles = ["config.json", "*.safetensors"]
+    /// The files `HeartMuLaPipeline` opens per bundle — the materialization contract. The bf16 LM and fp32 codec are sharded:
+    /// `WeightIO.shards` reads `model.safetensors.index.json` to find them, so `*.json` must carry it (v0.1.0 declared only
+    /// `config.json` / `tokenizer.json` / `gen_config.json` and an engine download of a sharded repo failed — V4); the 8-bit LM and
+    /// fp16 codec are one file. `*.json` also covers the configs and the tokenizer.
+    public static let lmFiles = ["*.json", "*.safetensors"]
+    public static let codecFiles = ["*.json", "*.safetensors"]
     /// Representative file per bundle for the missing-probe.
     static let lmProbe = "tokenizer.json"
     static let codecProbe = "config.json"

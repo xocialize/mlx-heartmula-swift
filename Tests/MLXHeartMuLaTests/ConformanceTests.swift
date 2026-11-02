@@ -176,6 +176,15 @@ final class MaterializationConformanceTests: XCTestCase {
                 XCTAssertTrue(layout.contains { WeightSourceProbe.matches(path: $0, glob: glob) }, "codec glob \(glob)")
             }
         }
+        // every file the loader OPENS is downloaded (v0.1.0 missed the shard index — V4's fresh-download check caught it);
+        // LICENSE / NOTICE / README are documentation the loader never reads
+        let loaderReads: (String) -> Bool = { !["LICENSE", "NOTICE", "README.md"].contains($0) }
+        for (layout, globs) in [(lmSharded, HeartMuLaConfiguration.lmFiles), (lmSingle, HeartMuLaConfiguration.lmFiles),
+                                (codecSharded, HeartMuLaConfiguration.codecFiles), (codecSingle, HeartMuLaConfiguration.codecFiles)] {
+            for file in layout where loaderReads(file) {
+                XCTAssertTrue(globs.contains { WeightSourceProbe.matches(path: file, glob: $0) }, "not downloaded: \(file)")
+            }
+        }
     }
 
     /// An explicit pair reads as missing per role until its probe file exists; resolution needs both.
